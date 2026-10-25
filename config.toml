@@ -1,0 +1,51 @@
+# Модель Ollama (OpenAI-совместимый адрес). Облачные модели не используются.
+model = "qwen3.5:9b-q8_0"
+base_url = "http://localhost:11434/v1"
+
+# Папка проекта: инструменты работают только внутри неё (относительный путь — от папки агента)
+project_dir = "."
+
+max_steps = 10          # максимум шагов на одну задачу
+skill_timeout = 120     # таймаут скилла, секунд
+output_limit = 4000     # длинный вывод инструмента обрезается до стольких символов
+memory_limit = 4000     # размер memory.md, после которого агент предупреждает
+history_limit = 40      # сколько последних записей журнала видит модель
+start_url = "https://www.google.com"   # стартовая страница для /браузер
+headless = false        # браузер инструмента browser без окна
+auto_memory = true      # фоновый отбор фактов в память после каждого ответа
+reasoning_effort = "low"   # размышления модели: none (быстрее, но хуже понимает задачу) | low | medium | high
+skill_reasoning_effort = "medium"  # размышления при написании скилла
+
+# ---- Десктопный интерфейс (ui/) и голос (voice/); ядро секции [..] пропускает ----
+[ui]
+spaces = []              # ещё папки-пространства при старте (папка проекта ядра — всегда первая)
+widget_size = 140        # диаметр окна виджета, px
+chat_width = 1100
+chat_height = 750
+follow_mouse = true      # глаза виджета следят за курсором по всему экрану
+
+[voice]
+whisper_model = "small"  # faster-whisper: tiny | base | small | medium
+language = "ru"
+device = "auto"          # auto (GPU, если есть CUDA) | cpu | cuda
+compute_type = "int8"
+cleanup = true           # чистка речи моделью Ollama; без Ollama копируется сырой текст Whisper
+cleanup_model = ""       # пусто — модель ядра (model выше)
+dictate_cleanup = false  # диктовка в чат: чистить моделью (может подменить слова ответом) — обычно не нужно
+cleanup_timeout = 30
+sounds = true            # звуки начала и конца записи
+volume = 0.3
+silence_s = 1.5          # столько тишины после речи — и запись останавливается
+silence_level = 0.06     # громкость 0..1, ниже которой звук считается тишиной
+max_record_s = 120
+wake = true              # слушать имя агента в фоне с самого старта (меню виджета запоминает выбор)
+wake_words = ["ася"]     # имя агента для Vosk; слово должно быть в словаре модели
+wake_engine = "vosk"     # vosk | openwakeword (запасной: pip install openwakeword + своя модель слова)
+wake_model = "voice/models/vosk-model-small-ru-0.22"
+wake_confidence = 0.85   # порог уверенности слова-триггера
+wake_cooldown_s = 2.0    # пауза после срабатывания
+wake_gate = 0.04         # тише этого фон не распознаётся (экономит CPU)
+reply = "Да, слушаю."    # голосовой ответ на имя; пусто — молча
+tts_voice = "voice/models/piper/ru_RU-irina-medium.onnx"  # голоса Piper: irina, ruslan, dmitri, denis
+tts_volume = 0.8
+tts_pitch = 3            # полутоны вверх: голос звонче, темп тот же (0 — как есть)

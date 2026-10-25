@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Агент — чат</title>
+  <link rel="stylesheet" href="../theme.css">
+  <link rel="stylesheet" id="hljs-theme" href="../vendor/hljs-github-dark.css">
+  <link rel="stylesheet" href="chat.css">
+  <script src="../vendor/marked.min.js"></script>
+  <script src="../vendor/purify.min.js"></script>
+  <script src="../vendor/highlight.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <aside id="side">
+      <div id="side-resizer" title="тянуть — ширина колонки · двойной клик — обычная"></div>
+      <section class="box grow" id="spaces-box">
+        <div class="box-title">spaces <button class="title-btn" id="add-space" title="открыть папку">+</button></div>
+        <ul id="spaces" class="list"></ul>
+      </section>
+      <section class="box" id="settings-box">
+        <div class="box-title"><button class="title-btn" id="settings-toggle" title="инструменты, скиллы, память, корзина">⚙ настройки ▸</button></div>
+        <div id="settings" hidden>
+          <div class="group" data-group="tools"><button class="group-head"></button><ul id="tools" class="list"></ul></div>
+          <div class="group" data-group="skills"><button class="group-head"></button><ul id="skills" class="list"></ul></div>
+          <div class="group" data-group="memory"><button class="group-head"></button><ul id="memory" class="list"></ul></div>
+          <div class="group" data-group="trash"><button class="group-head"></button><ul id="trash" class="list"></ul></div>
+        </div>
+      </section>
+    </aside>
+
+    <main id="main" class="box">
+      <div id="tabs" class="box-title tabs"></div>
+      <div id="feeds"></div>
+      <div id="composer">
+        <div id="cmdlist" hidden></div>
+        <span class="prompt">&gt;</span>
+        <textarea id="input" rows="1" placeholder="задача для агента · / — команды · ↑ — прошлые" spellcheck="false"></textarea>
+        <button id="mic" title="диктовка голосом (текст попадёт в поле)">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <circle cx="16" cy="16" r="16" class="bg"/>
+            <rect x="12.6" y="6.5" width="6.8" height="12.5" rx="3.4" fill="#fff"/>
+            <path d="M17.2 8.4a2.2 2.2 0 0 1 1.1 1.4" stroke="currentColor" stroke-width="0.9" stroke-linecap="round" fill="none" class="shine"/>
+            <path d="M9.8 15.5a6.2 6.2 0 0 0 12.4 0" stroke="#fff" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+            <path d="M16 21.7v3.3M12.7 25h6.6" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </main>
+
+    <footer id="statusbar"></footer>
+  </div>
+
+  <div id="confirm" class="overlay" hidden>
+    <div class="dialog box">
+      <div class="box-title" id="confirm-title">подтверждение</div>
+      <div id="confirm-body"></div>
+      <div class="buttons">
+        <button data-answer="yes" class="primary">да <kbd>Enter</kbd></button>
+        <button data-answer="no">нет <kbd>Esc</kbd></button>
+        <button data-answer="session" id="confirm-session">на сессию <kbd>S</kbd></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="skillpanel" class="overlay side-panel" hidden>
+    <div class="dialog box">
+      <div class="box-title"><span id="skill-title">skill</span> <button class="title-btn" id="skill-close">×</button></div>
+      <div id="skill-body"></div>
+    </div>
+  </div>
+
+  <div id="switcher" class="overlay" hidden>
+    <div class="dialog box small">
+      <div class="box-title">пространства</div>
+      <input id="switcher-input" placeholder="фильтр или путь к папке" spellcheck="false">
+      <ul id="switcher-list" class="list"></ul>
+    </div>
+  </div>
+
+  <div id="popup" hidden></div>
+
+  <script src="chat.js"></script>
+</body>
+</html>

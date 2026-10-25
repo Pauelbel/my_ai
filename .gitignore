@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+logs/
+skills/*/.env
+*.bak
+.trash/
+ui/state.json
+voice/models/
+voice/phrases/
+browser_profile/
+memory/memory.md
+.directory

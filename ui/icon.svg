@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Иконка «Ася»: голова виджета — затмение (тёмный диск, раскалённое кольцо, тёплая корона) и глаза -->
+  <defs>
+    <radialGradient id="corona" cx="128" cy="128" r="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0.72" stop-color="#ff8a28" stop-opacity="0"/>
+      <stop offset="0.78" stop-color="#ff8a28" stop-opacity="0.95"/>
+      <stop offset="0.88" stop-color="#ff7a1e" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#ff6a14" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="disk" cx="116" cy="110" r="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d0705"/>
+      <stop offset="0.8" stop-color="#080403"/>
+      <stop offset="0.94" stop-color="#1d0c04"/>
+      <stop offset="1" stop-color="#5a2608"/>
+    </radialGradient>
+    <radialGradient id="bead" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fffdf2"/>
+      <stop offset="0.3" stop-color="#ffd291" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#ff8a28" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="5"/></filter>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3"/></filter>
+  </defs>
+  <circle cx="128" cy="128" r="128" fill="url(#corona)"/>
+  <circle cx="128" cy="128" r="99" fill="url(#disk)"/>
+  <circle cx="128" cy="128" r="99" fill="none" stroke="#ff9a3c" stroke-width="11" filter="url(#glow)"/>
+  <circle cx="128" cy="128" r="99" fill="none" stroke="#fff4e0" stroke-width="6"/>
+  <circle cx="225" cy="142" r="21" fill="url(#bead)"/>
+  <g fill="#ff9a3c" filter="url(#soft)" opacity="0.9">
+    <rect x="88" y="100" width="20" height="54" rx="10"/>
+    <rect x="148" y="100" width="20" height="54" rx="10"/>
+  </g>
+  <g fill="#fff1dc">
+    <rect x="89" y="101" width="18" height="52" rx="9"/>
+    <rect x="149" y="101" width="18" height="52" rx="9"/>
+  </g>
+</svg>

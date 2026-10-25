@@ -1,0 +1,43 @@
+/* Общие цвета и шрифты обоих окон. Тёмная тема по умолчанию, светлая — data-theme="light" на <html>. */
+
+@font-face { font-family: "JetBrains Mono"; src: url("vendor/JetBrainsMono-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; }
+@font-face { font-family: "JetBrains Mono"; src: url("vendor/JetBrainsMono-Bold.woff2") format("woff2"); font-weight: 700; font-style: normal; }
+@font-face { font-family: "JetBrains Mono"; src: url("vendor/JetBrainsMono-Italic.woff2") format("woff2"); font-weight: 400; font-style: italic; }
+
+:root {
+  --bg: #0d1117;
+  --bg-raised: #161b22;
+  --bg-user: #161b22;
+  --bg-hover: #1f2630;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --muted: #6e7681;
+  --accent: #58a6ff;
+  --working: #d29922;
+  --idle: #6e7681;
+  --done: #3fb950;
+  --error: #f85149;
+  --diff-add: #3fb950;
+  --diff-del: #f85149;
+  --font: "JetBrains Mono", Consolas, "DejaVu Sans Mono", monospace;
+  --font-size: 14px;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-raised: #f6f8fa;
+  --bg-user: #f3f5f8;
+  --bg-hover: #eaeef2;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --muted: #6e7781;
+  --accent: #0969da;
+  --working: #9a6700;
+  --idle: #8c959f;
+  --done: #1a7f37;
+  --error: #cf222e;
+  --diff-add: #1a7f37;
+  --diff-del: #cf222e;
+  color-scheme: light;
+}
