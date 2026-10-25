@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import difflib
 import inspect
 import json
@@ -18,10 +19,13 @@ import threading
 import time
 import urllib.request
 from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from agent_core import ROOT, Agent, Config, Event
+from agent_core.agent import Agent
+from agent_core.config import ROOT, Config
+from agent_core.events import Event
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +34,14 @@ STATE_FILE = UI_DIR / "state.json"  # настройки окна: позици�
 TOKEN_INTERVAL = 1 / 20  # склеенные token уходят в окно не чаще 20 раз/с
 WIDGET_INTERVAL = 1 / 30  # состояние и громкость — в виджет ~30 раз/с
 IS_WINDOWS = sys.platform == "win32"
+CONNECTION_KEYS = ("base_url", "model", "reasoning_effort", "skill_reasoning_effort")  # вкладка «Подключение»
+EFFORTS = ("none", "low", "medium", "high")
+HIDDEN_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache"}  # не в дереве
+UI_KEYS = ("font_size", "theme", "sidebar", "settings_tab", "sidebar_width", "editor_width")  # настройки окна чата
+MAX_OPEN_BYTES = 2_000_000  # больше — редактор не открывает
+IMAGES_DIR = ROOT / "logs" / "images"  # картинки из чата: журнал сессии ссылается на них путями
+IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+MAX_IMAGE_BYTES = 10_000_000
 
 
 # ----------------------------------------
@@ -200,7 +212,7 @@ def make_diff(project: Path, name: str, args: dict[str, Any]) -> str:
 
 
 # ----------------------------------------
-# Путь от папки проекта (agent_core/tools.py), а если вне её — полный
+# Путь от папки проекта (agent_core/tools/files.py), а если вне её — полный
 # ----------------------------------------
 def relative(path: Path) -> str:
     path = path.resolve()
@@ -320,6 +332,7 @@ class ChatApi:
         self._lock = threading.RLock()
         self._on_confirm: Callable[[bool], None] = lambda waiting: None
         self._dictate: Callable[[Callable[[str], None]], str | None] = lambda on_partial: None
+        self._on_connection: Callable[[str, str], None] = lambda base_url, model: None
         self._window: Any = None
         self._trash: list[str] = [str(path) for path in state.get("trash_spaces", [])]  # убранные пространства
         for folder in folders:
@@ -335,32 +348,40 @@ class ChatApi:
     # Привязка к окну и колбэкам ui/app.py (вызывается до webview.start)
     # ----------------------------------------
     def _attach(self, window: Any, on_confirm: Callable[[bool], None],
-                dictate: Callable[[Callable[[str], None]], str | None]) -> None:
+                dictate: Callable[[Callable[[str], None]], str | None],
+                on_connection: Callable[[str, str], None] | None = None) -> None:
         self._window = window
         self._emitter = Emitter(window)
         self._on_confirm = on_confirm
         self._dictate = dictate
+        if on_connection:
+            self._on_connection = on_connection
 
     # ======== контракт ТЗ ========
 
     # ----------------------------------------
     # Отправляет текст в активную сессию; agent.send идёт в фоновом потоке
     # ----------------------------------------
-    def send(self, text: str, session_id: str = "") -> dict[str, Any]:
+    def send(self, text: str, session_id: str = "", images: list[str] | None = None) -> dict[str, Any]:
         text = str(text).strip()
         session = self._session(session_id)
-        if not text:
+        if not text and not images:
             return {"ok": False}
         if session.busy:
             return {"ok": False, "error": "агент ещё работает — esc, чтобы остановить"}
+        try:
+            paths = [self._save_image(url, session.id) for url in images or []]
+        except ValueError as error:
+            return {"ok": False, "error": str(error)}
+        text = text or "Посмотри на картинку."
         if session.title == "новая" and not text.startswith("/"):
             session.title = text[:24] + ("…" if len(text) > 24 else "")
-        session.thread = threading.Thread(target=self._run, args=(session, text), name="agent", daemon=True)
+        session.thread = threading.Thread(target=self._run, args=(session, text, paths), name="agent", daemon=True)
         session.thread.start()
         return {"ok": True, "session": session.id}
 
     # ----------------------------------------
-    # Ответ на confirm_request / need_skill: "yes" | "no" | "session"
+    # Ответ на confirm_request / need_skill / continue_request: "yes" | "no" | "session"
     # ----------------------------------------
     def confirm(self, event_id: str, answer: str) -> None:
         for session in self._all_sessions():
@@ -430,6 +451,92 @@ class ChatApi:
                 return {"name": name, "skill_md": read("SKILL.md"), "run_py": read("run.py"), "folder": str(skill.folder),
                         "path": relative(skill.folder) + "/"}
         return {"name": name, "skill_md": "", "run_py": "", "folder": "", "path": ""}
+
+    # ======== файлы активного пространства: дерево и редактор ========
+
+    # ----------------------------------------
+    # Содержимое папки для дерева: папки первыми; path — от корня пространства («» — сам корень)
+    # ----------------------------------------
+    def files(self, path: str = "") -> dict[str, Any]:
+        try:
+            root, folder = self._space_path(path)
+            entries = sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        items = [{"name": entry.name, "path": entry.relative_to(root).as_posix(), "dir": entry.is_dir()}
+                 for entry in entries if not (entry.is_dir() and entry.name in HIDDEN_DIRS)]
+        return {"ok": True, "root": str(root), "path": path, "items": items}
+
+    # ----------------------------------------
+    # Текст файла для редактора; mtime — чтобы при сохранении заметить, что файл поменяли на диске
+    # ----------------------------------------
+    def open_file(self, path: str, root: str = "") -> dict[str, Any]:
+        try:
+            _root, full = self._space_path(path, root)
+            if full.stat().st_size > MAX_OPEN_BYTES:
+                return {"ok": False, "error": f"файл больше {MAX_OPEN_BYTES // 1_000_000} МБ"}
+            data = full.read_bytes()
+            if b"\0" in data[:8192]:
+                return {"ok": False, "error": "двоичный файл — не текст"}
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return {"ok": False, "error": "файл не в UTF-8"}
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        return {"ok": True, "path": path, "root": str(_root), "text": text.replace("\r\n", "\n"), "crlf": "\r\n" in text,
+                "mtime": str(full.stat().st_mtime_ns)}  # строкой: наносекунды не влезают в число JS
+
+    # ----------------------------------------
+    # Сохранение из редактора (root — пространство вкладки); файл поменяли после открытия — conflict, пока не придёт force
+    # ----------------------------------------
+    def save_file(self, path: str, text: str, mtime: str = "", crlf: bool = False, force: bool = False,
+                  root: str = "") -> dict[str, Any]:
+        try:
+            _root, full = self._space_path(path, root)
+            if not force and mtime and full.exists() and str(full.stat().st_mtime_ns) != mtime:
+                return {"ok": False, "conflict": True, "error": "файл изменился на диске после открытия"}
+            full.write_text(text.replace("\n", "\r\n") if crlf else text, encoding="utf-8", newline="")
+            return {"ok": True, "mtime": str(full.stat().st_mtime_ns)}
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+
+    # ----------------------------------------
+    # Картинка сообщения для ленты: data URL (страница открыта по http — file:// ей недоступен); только из logs/images/
+    # ----------------------------------------
+    def image(self, path: str) -> str:
+        full = Path(str(path)).resolve()
+        mime = {ext: mime for mime, ext in IMAGE_TYPES.items()}.get(full.suffix.lstrip("."))
+        if not mime or not full.is_relative_to(IMAGES_DIR.resolve()) or not full.is_file():
+            return ""
+        return f"data:{mime};base64,{base64.b64encode(full.read_bytes()).decode('ascii')}"
+
+    # ----------------------------------------
+    # Картинка из чата (data URL) → файл в logs/images/; путь уходит ядру
+    # ----------------------------------------
+    def _save_image(self, url: str, session_id: str) -> str:
+        head, _, data = str(url).partition(",")
+        mime = head.removeprefix("data:").removesuffix(";base64")
+        if mime not in IMAGE_TYPES or not head.endswith(";base64"):
+            raise ValueError(f"картинка {mime or '?'} не поддерживается: только png, jpeg, webp, gif")
+        raw = base64.b64decode(data)
+        if len(raw) > MAX_IMAGE_BYTES:
+            raise ValueError(f"картинка больше {MAX_IMAGE_BYTES // 1_000_000} МБ")
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        path = IMAGES_DIR / f"{datetime.now():%Y-%m-%d_%H%M%S}_{session_id}_{secrets.token_hex(3)}.{IMAGE_TYPES[mime]}"
+        path.write_bytes(raw)
+        return str(path)
+
+    # ----------------------------------------
+    # Путь внутри пространства root (пусто — активного); выход за его пределы — ошибка
+    # ----------------------------------------
+    def _space_path(self, path: str, root: str = "") -> tuple[Path, Path]:
+        if root and root not in self._spaces:
+            raise ValueError(f"пространства {root} нет")
+        root = self._spaces[root or self._active].path.resolve()
+        full = (root / path).resolve()
+        if not full.is_relative_to(root):
+            raise ValueError(f"{path} вне папки пространства")
+        return root, full
 
     # ----------------------------------------
     # Пространства для левой колонки
@@ -535,7 +642,7 @@ class ChatApi:
                 "skills": self.skills(), "tools": self.tools(), "memory": self.memory(),
                 "commands": self.commands(),
                 "trash": [{"path": path, "name": Path(path).name or path} for path in self._trash],
-                "ui": {key: self._state.get(key) for key in ("font_size", "theme", "sidebar", "settings", "sidebar_width")}}
+                "ui": {key: self._state.get(key) for key in UI_KEYS}}
 
     # ----------------------------------------
     # Записи журнала сессии — лента восстанавливается из них, своей истории у UI нет
@@ -598,12 +705,47 @@ class ChatApi:
     # Модели из `ollama list` (GET /api/tags)
     # ----------------------------------------
     def models(self) -> list[str]:
-        url = self._config.base_url.rstrip("/").removesuffix("/v1") + "/api/tags"
+        return self.check_connection(self._config.base_url).get("models", [])
+
+    # ----------------------------------------
+    # Вкладка «Подключение»: адрес Ollama, модель, размышления
+    # ----------------------------------------
+    def connection(self) -> dict[str, Any]:
+        values = {key: getattr(self._config, key) for key in CONNECTION_KEYS}
+        return {**values, "efforts": list(EFFORTS)}
+
+    # ----------------------------------------
+    # Проверка адреса Ollama: отвечает ли и какие модели есть (`ollama list`)
+    # ----------------------------------------
+    def check_connection(self, base_url: str) -> dict[str, Any]:
+        url = base_url.strip().rstrip("/").removesuffix("/v1") + "/api/tags"
         try:
             with urllib.request.urlopen(url, timeout=3) as response:
-                return sorted(item["name"] for item in json.load(response).get("models", []))
-        except (OSError, ValueError, KeyError):
-            return []
+                models = sorted(item["name"] for item in json.load(response).get("models", []))
+        except (OSError, ValueError, KeyError) as error:
+            return {"ok": False, "error": f"Ollama не отвечает: {error}"}
+        return {"ok": True, "models": models}
+
+    # ----------------------------------------
+    # Сохранение подключения: config.toml и все агенты (новые сессии — тоже); пока агент работает — нельзя
+    # ----------------------------------------
+    def save_connection(self, values: dict[str, Any]) -> dict[str, Any]:
+        changes = {key: str(values[key]).strip() for key in CONNECTION_KEYS if key in values}
+        if not changes.get("base_url", self._config.base_url) or not changes.get("model", self._config.model):
+            return {"ok": False, "error": "адрес и модель не могут быть пустыми"}
+        for key in ("reasoning_effort", "skill_reasoning_effort"):
+            if key in changes and changes[key] not in EFFORTS:
+                return {"ok": False, "error": f"{key}: одно из {', '.join(EFFORTS)}"}
+        with self._lock:
+            if any(session.busy for session in self._all_sessions()):
+                return {"ok": False, "error": "агент работает — дождись ответа"}
+            Config.save(changes)
+            for key, value in changes.items():
+                setattr(self._config, key, value)
+            for session in self._all_sessions():
+                session.agent.configure(**changes)
+        self._on_connection(self._config.base_url, self._config.model)
+        return {"ok": True, **self.connection()}
 
     # ----------------------------------------
     # Смена модели для активной сессии командой /модель
@@ -620,8 +762,7 @@ class ChatApi:
     # Настройки окна: шрифт, тема, свёрнута ли левая колонка
     # ----------------------------------------
     def save_ui(self, values: dict[str, Any]) -> None:
-        keys = ("font_size", "theme", "sidebar", "settings", "sidebar_width")
-        allowed = {key: values[key] for key in keys if key in values}
+        allowed = {key: values[key] for key in UI_KEYS if key in values}
         self._state.update(**allowed)
 
     # ----------------------------------------
@@ -641,15 +782,15 @@ class ChatApi:
     # ----------------------------------------
     # Фоновый поток одной задачи: каждое событие ядра → JSON → окно чата
     # ----------------------------------------
-    def _run(self, session: Session, text: str) -> None:
-        self._emit(session, Event("user", text))
+    def _run(self, session: Session, text: str, images: list[str]) -> None:
+        self._emit(session, Event("user", text, {"images": images} if images else {}))
         try:
-            for event in session.agent.send(text):
+            for event in session.agent.send(text, images):
                 if event.type == "confirm_request":
                     diff = make_diff(session.agent.config.project_dir, event.data.get("name", ""),
                                      event.data.get("args") or {})
                     event = replace(event, data={**event.data, "diff": diff})
-                if event.type in ("confirm_request", "need_skill"):
+                if event.type in ("confirm_request", "need_skill", "continue_request"):
                     session.pending.add(event.id)
                     self._emit(session, event)
                     self._on_confirm(True)

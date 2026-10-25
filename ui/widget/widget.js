@@ -652,7 +652,7 @@ function closeMenu() {
   clearTimeout(leaveTimer);
   if (menu.hidden) return;
   menu.hidden = true;
-  api().menu(false).then(() => place(canvas, [0, 0]));
+  api().menu(false).then((layout) => place(canvas, (layout && layout.ring) || [0, 0]));
 }
 
 menu.addEventListener("click", (e) => {
@@ -674,7 +674,11 @@ document.addEventListener("pointerdown", (e) => { if (!menu.hidden && !menu.cont
 // Старт: canvas, состояние из Python, цикл кадров
 // ----------------------------------------
 window.addEventListener("pywebviewready", () => {
-  api().ready().then((state) => { if (state) window.onState(state); });
+  api().ready().then((state) => {
+    if (!state) return;
+    if (state.ring) place(canvas, state.ring);  // на Qt голова в середине большого прозрачного окна
+    window.onState(state);
+  });
 });
 setupCanvas();
 setState("idle", {});

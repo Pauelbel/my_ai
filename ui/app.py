@@ -17,7 +17,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
-from agent_core import ROOT, Config
+from agent_core.config import ROOT, Config
 
 from .bridge import UI_DIR, ChatApi, UiState, WidgetApi, WidgetPort
 from .cursor import CursorTracker
@@ -26,6 +26,7 @@ log = logging.getLogger("ui")
 
 WIDGET_SIZE = 140
 MENU_TUCK = 26  # на столько меню заходит на угол головы — выглядит прикреплённым к ней
+MENU_ROOM = (310, 200)  # запас под меню вокруг головы на Qt (меню с тенью меньше этого)
 
 
 # ----------------------------------------
@@ -67,6 +68,8 @@ class App:
         self.cursor: CursorTracker | None = None
         self._ring_offset = (0, 0)  # где голова внутри окна виджета (сдвигается, пока открыто меню)
         self._head_pos = (0, 0)  # где голова стоит на экране, пока открыто меню
+        self.mask: Any = None  # Qt: окно с запасом под меню и маской — меню открывается без resize/move
+        self.masked = False  # окно виджета на Qt и с маской
         self._quitting = False
 
     # ----------------------------------------
@@ -88,10 +91,16 @@ class App:
         import webview
 
         size = int(self.ui.get("widget_size", WIDGET_SIZE))
-        x, y = self.state.get("widget_pos") or default_position(webview, size)
+        x, y = self.state.get("widget_pos") or default_position(webview, size)  # где голова на экране
+        width = height = size
+        self.masked = gui == "qt"
+        if self.masked:  # окно сразу с запасом под меню: голова в середине, вокруг — сквозная прозрачность
+            self._ring_offset = (MENU_ROOM[0] - MENU_TUCK, MENU_ROOM[1] - MENU_TUCK)
+            width, height = size + 2 * self._ring_offset[0], size + 2 * self._ring_offset[1]
+            x, y = x - self._ring_offset[0], y - self._ring_offset[1]
         self.widget = webview.create_window(
             "Агент", url=str(UI_DIR / "widget" / "index.html"), js_api=WidgetApi(self._widget_actions()),
-            width=size, height=size, x=x, y=y, resizable=False, frameless=True, easy_drag=False, shadow=False,
+            width=width, height=height, x=x, y=y, resizable=False, frameless=True, easy_drag=False, shadow=False,
             transparent=True, on_top=True, background_color="#000000", focus=False, hidden=self.show_chat)
         self.chat = webview.create_window(
             "Агент — чат", url=str(UI_DIR / "chat" / "index.html"), js_api=self.chat_api,
@@ -101,7 +110,11 @@ class App:
         self.chat.events.minimized += self._show_head  # чат свернули — голова снова на экране
         self.chat.events.restored += self._sync_head
         self.widget.events.closing += self._widget_closing
-        self.chat_api._attach(self.chat, self._on_confirm, self.voice.dictate if self.voice else lambda on_partial: None)
+        if self.masked:
+            self.widget.events.before_show += self._unmanage
+            self.widget.events.shown += self._mask_head
+        dictate = self.voice.dictate if self.voice else lambda on_partial: None
+        self.chat_api._attach(self.chat, self._on_confirm, dictate, self._on_connection)
         port = WidgetPort(self.widget)
         if self.voice:
             self.voice.on_state = port.set
@@ -216,6 +229,8 @@ class App:
     # ----------------------------------------
     def _menu(self, opened: bool, width: int = 0, height: int = 0) -> dict[str, Any]:
         size = int(self.ui.get("widget_size", WIDGET_SIZE))
+        if self.masked and self._mask_ready():
+            return self._menu_masked(opened, width, height, size)
         if not opened:
             if self._ring_offset != (0, 0) or (self.widget.width, self.widget.height) != (size, size):
                 self.widget.resize(size, size)
@@ -236,6 +251,64 @@ class App:
         return {"ring": [-min_x, -min_y], "menu": [dx - min_x, dy - min_y]}
 
     # ----------------------------------------
+    # Qt: меню открывается сменой маски — окно не двигается и не меняет размер
+    # ----------------------------------------
+    def _menu_masked(self, opened: bool, width: int, height: int, size: int) -> dict[str, Any]:
+        ox, oy = self._ring_offset
+        if not opened:
+            self._mask_head()
+            return {"ring": [ox, oy]}
+        width, height = min(width, MENU_ROOM[0]), min(height, MENU_ROOM[1])
+        x, y = self.widget.x + ox, self.widget.y + oy  # голова на экране
+        left, top, right, bottom = screen_bounds(x + size // 2, y + size // 2)
+        # Меню справа сверху от головы; не помещается — слева и/или снизу
+        dx = size - MENU_TUCK if x + size - MENU_TUCK + width <= right else MENU_TUCK - width
+        dy = MENU_TUCK - height if y + MENU_TUCK - height >= top else size - MENU_TUCK
+        menu = (ox + dx, oy + dy, width, height)
+        self.mask.set([(ox, oy, size)], [menu])
+        return {"ring": [ox, oy], "menu": [menu[0], menu[1]]}
+
+    # ----------------------------------------
+    # Маска «только голова»: всё вокруг пропускает клики к окнам под виджетом
+    # ----------------------------------------
+    def _mask_head(self) -> None:
+        if self._mask_ready():
+            ox, oy = self._ring_offset
+            self.mask.set([(ox, oy, int(self.ui.get("widget_size", WIDGET_SIZE)))])
+
+    # ----------------------------------------
+    # Подключение сменили в настройках чата: чистка речи идёт туда же
+    # ----------------------------------------
+    def _on_connection(self, base_url: str, model: str) -> None:
+        if self.voice:
+            self.voice.base_url, self.voice.model = base_url, model
+
+    # ----------------------------------------
+    # Qt, до первого показа: окно виджета — неуправляемым, иначе KWin прижимает большое окно к краю экрана
+    # ----------------------------------------
+    def _unmanage(self) -> None:
+        try:
+            from .qt_mask import unmanage
+
+            unmanage(self.widget)
+        except Exception:
+            log.warning("Окно виджета осталось управляемым — у края экрана его прижмёт", exc_info=True)
+
+    # ----------------------------------------
+    # Объект маски создаётся при первом обращении, когда окно Qt уже есть
+    # ----------------------------------------
+    def _mask_ready(self) -> bool:
+        if self.mask is None:
+            try:
+                from .qt_mask import WindowMask
+
+                self.mask = WindowMask(self.widget)
+            except Exception:
+                log.warning("Маска окна недоступна — меню будет открываться изменением окна", exc_info=True)
+                self.mask = False
+        return bool(self.mask)
+
+    # ----------------------------------------
     # Перетаскивание виджета мышью
     # ----------------------------------------
     def _drag(self, dx: int, dy: int, start: bool) -> None:
@@ -248,7 +321,8 @@ class App:
     # Позиция виджета запоминается в ui/state.json
     # ----------------------------------------
     def _drag_end(self) -> None:
-        self.state.update(widget_pos=list(self._drag_to))  # widget.x обновляется не сразу после move
+        # widget.x обновляется не сразу после move; сохраняем, где голова, а не угол окна
+        self.state.update(widget_pos=[self._drag_to[0] + self._ring_offset[0], self._drag_to[1] + self._ring_offset[1]])
 
     # ----------------------------------------
     # Начальное состояние для страницы виджета
@@ -256,6 +330,7 @@ class App:
     def _ready(self) -> dict[str, Any]:
         state = self.port.snapshot()
         state["wake"] = bool(self.voice and self.voice.wake and self.voice.wake.active)
+        state["ring"] = list(self._ring_offset)  # где голова внутри окна
         return state
 
     # ----------------------------------------

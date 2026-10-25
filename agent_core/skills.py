@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import Config, SKILLS_DIR
-from .tools import venv_env
+from .tools.base import venv_env
 
 if TYPE_CHECKING:
     from .schemas import SkillCode

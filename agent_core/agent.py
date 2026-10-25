@@ -12,7 +12,6 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Generator
 
-from .browser import Browser
 from .commands import load_commands, match_command
 from .config import MEMORY_FILE, Config
 from .events import Event, Status, git_branch, parse_confirm, show_args
@@ -24,7 +23,9 @@ from .schemas import Action, Answer, Facts, NeedSkill, Reply
 from .service import ServiceCommands
 from .skill_flow import SkillFlow
 from .skills import SkillInfo, load_skills, run_skill
-from .tools import TOOLS, Tool, Workspace, trim
+from .tools import files, search, shell, remember, browser  # noqa: F401 — импорт регистрирует инструменты в TOOLS
+from .tools.base import TOOLS, Tool, Workspace, trim
+from .tools.browser import Browser
 
 
 # Пользователь просит обойтись без новых скиллов: «не нужно устанавливать скрипты», «без установки пакетов»
@@ -52,6 +53,7 @@ class Agent(ServiceCommands, SkillFlow):
         self.approved: set[str] = set()
         self.state = "idle"
         self.step = 0
+        self.step_limit = self.config.max_steps  # растёт, когда пользователь просит продолжить
         self.started = time.monotonic()
         self._stop = threading.Event()
         self._closed = False
@@ -66,7 +68,7 @@ class Agent(ServiceCommands, SkillFlow):
     # ----------------------------------------
     # Главный вход: текст пользователя → генератор событий
     # ----------------------------------------
-    def send(self, text: str) -> Generator[Event, None, None]:
+    def send(self, text: str, images: list[str] | None = None) -> Generator[Event, None, None]:
         text = text.strip()
         if text == "/стоп":
             self.stop()
@@ -74,8 +76,9 @@ class Agent(ServiceCommands, SkillFlow):
             return
         self._stop.clear()
         self.state, self.step = "working", 0
+        self.step_limit = self.config.max_steps
         try:
-            yield from self._dispatch(text)
+            yield from self._dispatch(text, images or [])
         finally:
             self.state = "done" if self.journal.records else "idle"
         yield Event("status", data=asdict(self.status()))
@@ -83,21 +86,21 @@ class Agent(ServiceCommands, SkillFlow):
     # ----------------------------------------
     # Разбор сообщения: служебная команда, быстрая команда или задача для модели
     # ----------------------------------------
-    def _dispatch(self, text: str) -> Generator[Event, None, None]:
+    def _dispatch(self, text: str, images: list[str]) -> Generator[Event, None, None]:
         if len(self.memory.read()) > self.config.memory_limit:
             yield Event("warning", f"Память больше {self.config.memory_limit} символов — почисти {MEMORY_FILE}")
-        if text.split(" ", 1)[0] in {key.split(" ")[0] for key in SERVICE_HELP}:
+        if not images and text.split(" ", 1)[0] in {key.split(" ")[0] for key in SERVICE_HELP}:
             yield from self._service(text)
             return
-        quick = match_command(text, self.commands)
+        quick = None if images else match_command(text, self.commands)
         if quick:
             yield from self._quick(text, *quick)
             return
-        self.journal.write({"type": "user", "text": text})
+        self.journal.write({"type": "user", "text": text, **({"images": images} if images else {})})
         yield from self._loop(text, step=0)
 
     # ----------------------------------------
-    # Ответ UI на confirm_request или need_skill: "yes" | "no" | "session"
+    # Ответ UI на confirm_request, need_skill или continue_request: "yes" | "no" | "session"
     # ----------------------------------------
     def confirm(self, event_id: str, answer: str) -> None:
         with self._answered:
@@ -116,7 +119,7 @@ class Agent(ServiceCommands, SkillFlow):
     # Состояние для строки статуса UI
     # ----------------------------------------
     def status(self) -> Status:
-        return Status(model=self.config.model, state=self.state, step=self.step, max_steps=self.config.max_steps,
+        return Status(model=self.config.model, state=self.state, step=self.step, max_steps=self.step_limit,
                       context_used=self._context_used, context_max=self._context_max,
                       prompt_tokens=self._prompt_tokens, completion_tokens=self._completion_tokens,
                       tokens_per_sec=round(self._speed, 1), session=self.journal.path.stem,
@@ -146,6 +149,17 @@ class Agent(ServiceCommands, SkillFlow):
     # ----------------------------------------
     def save_memory(self, facts: list[str]) -> list[str]:
         return self.memory.replace(facts)
+
+    # ----------------------------------------
+    # Новые настройки подключения (model, base_url, reasoning_effort…) — со следующего шага;
+    # сменился адрес — клиент модели создаётся заново
+    # ----------------------------------------
+    def configure(self, **changes: Any) -> None:
+        base_url = self.config.base_url
+        for key, value in changes.items():
+            setattr(self.config, key, value)
+        if self.config.base_url != base_url:
+            self.model = Model(self.config)
 
     # ----------------------------------------
     # Записи журнала текущей сессии — по ним UI восстанавливает ленту
@@ -184,7 +198,12 @@ class Agent(ServiceCommands, SkillFlow):
         last_error: tuple[str, str] | None = None
         # новая ли задача; сколько шагов инструментами; сколько раз отговорили от нового скилла
         fresh, tried, nudged = step == 0, 0, 0
-        while step < self.config.max_steps:
+        self.step_limit = step + self.config.max_steps
+        while True:
+            if step >= self.step_limit and not (yield from self._continue(step)):
+                self.journal.write({"type": "end", "reason": "max_steps"})
+                yield Event("info", f"Остановлено на {step} шагах — задача не закончена.")
+                return
             if self._stop.is_set():
                 self.journal.write({"type": "end", "reason": "stop"})
                 yield Event("info", "Остановлено.")
@@ -219,8 +238,18 @@ class Agent(ServiceCommands, SkillFlow):
                 yield from self._force_need_skill(task, action.name, error)
                 return
             last_error = (action.name, error) if error else None
-        self.journal.write({"type": "end", "reason": "max_steps"})
-        yield Event("error", f"Достигнут лимит в {self.config.max_steps} шагов, задача не закончена.")
+
+    # ----------------------------------------
+    # Шаги кончились: спросить пользователя; «да» — ещё max_steps шагов
+    # ----------------------------------------
+    def _continue(self, step: int) -> Generator[Event, None, bool]:
+        answer = yield from self._ask_user("continue_request",
+                                           f"Шагов сделано: {step}, задача не закончена. Продолжить?", {"step": step})
+        if answer == "no" or self._stop.is_set():
+            return False
+        self.step_limit = step + self.config.max_steps
+        self.journal.write({"type": "note", "text": f"Шаги кончились ({step}) — пользователь попросил продолжить."})
+        return True
 
     # ----------------------------------------
     # Модель попросила скилл, ничего не попробовав (или пользователь запретил новые скиллы) — вернуть к инструментам

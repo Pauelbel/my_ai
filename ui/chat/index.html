@@ -14,39 +14,74 @@
   <div id="app">
     <aside id="side">
       <div id="side-resizer" title="тянуть — ширина колонки · двойной клик — обычная"></div>
-      <section class="box grow" id="spaces-box">
+      <section class="box" id="spaces-box">
         <div class="box-title">spaces <button class="title-btn" id="add-space" title="открыть папку">+</button></div>
         <ul id="spaces" class="list"></ul>
       </section>
-      <section class="box" id="settings-box">
-        <div class="box-title"><button class="title-btn" id="settings-toggle" title="инструменты, скиллы, память, корзина">⚙ настройки ▸</button></div>
-        <div id="settings" hidden>
-          <div class="group" data-group="tools"><button class="group-head"></button><ul id="tools" class="list"></ul></div>
-          <div class="group" data-group="skills"><button class="group-head"></button><ul id="skills" class="list"></ul></div>
-          <div class="group" data-group="memory"><button class="group-head"></button><ul id="memory" class="list"></ul></div>
-          <div class="group" data-group="trash"><button class="group-head"></button><ul id="trash" class="list"></ul></div>
-        </div>
+      <section class="box grow" id="files-box">
+        <div class="box-title">files <button class="title-btn" id="files-refresh" title="обновить дерево">↻</button></div>
+        <ul id="files" class="list tree"></ul>
       </section>
+      <button id="settings-open" title="подключение, инструменты, скиллы, память, корзина (ctrl+,)">⚙ настройки</button>
     </aside>
 
-    <main id="main" class="box">
-      <div id="tabs" class="box-title tabs"></div>
-      <div id="feeds"></div>
-      <div id="composer">
-        <div id="cmdlist" hidden></div>
-        <span class="prompt">&gt;</span>
-        <textarea id="input" rows="1" placeholder="задача для агента · / — команды · ↑ — прошлые" spellcheck="false"></textarea>
-        <button id="mic" title="диктовка голосом (текст попадёт в поле)">
-          <svg viewBox="0 0 32 32" aria-hidden="true">
-            <circle cx="16" cy="16" r="16" class="bg"/>
-            <rect x="12.6" y="6.5" width="6.8" height="12.5" rx="3.4" fill="#fff"/>
-            <path d="M17.2 8.4a2.2 2.2 0 0 1 1.1 1.4" stroke="currentColor" stroke-width="0.9" stroke-linecap="round" fill="none" class="shine"/>
-            <path d="M9.8 15.5a6.2 6.2 0 0 0 12.4 0" stroke="#fff" stroke-width="1.6" stroke-linecap="round" fill="none"/>
-            <path d="M16 21.7v3.3M12.7 25h6.6" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
-          </svg>
-        </button>
-      </div>
-    </main>
+    <div id="work">
+      <main id="main" class="box">
+        <div id="tabs" class="box-title tabs"></div>
+        <div id="feeds"></div>
+        <div id="attachments" hidden></div>
+        <div id="composer">
+          <div id="cmdlist" hidden></div>
+          <span class="prompt">&gt;</span>
+          <textarea id="input" rows="1" placeholder="задача для агента · / — команды · ↑ — прошлые" spellcheck="false"></textarea>
+          <button id="attach" title="картинка к сообщению (или ctrl+v, или перетащить в окно)">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><circle cx="5.5" cy="6" r="1.2"/><path d="M14.5 11l-4-4-6.5 6.5"/>
+            </svg>
+          </button>
+          <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          <button id="mic" title="диктовка голосом (текст попадёт в поле)">
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+              <circle cx="16" cy="16" r="16" class="bg"/>
+              <rect x="12.6" y="6.5" width="6.8" height="12.5" rx="3.4" fill="#fff"/>
+              <path d="M17.2 8.4a2.2 2.2 0 0 1 1.1 1.4" stroke="currentColor" stroke-width="0.9" stroke-linecap="round" fill="none" class="shine"/>
+              <path d="M9.8 15.5a6.2 6.2 0 0 0 12.4 0" stroke="#fff" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+              <path d="M16 21.7v3.3M12.7 25h6.6" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </main>
+
+      <section id="editor" class="box" hidden>
+        <div id="editor-resizer" title="тянуть — ширина редактора · двойной клик — пополам"></div>
+        <div id="file-tabs" class="box-title tabs"></div>
+        <div class="editor-bar">
+          <span id="editor-path" class="muted"></span>
+          <span id="editor-note" class="meta"></span>
+          <button id="editor-preview-toggle" class="icon-btn" title="просмотр Markdown (ctrl+shift+v)" hidden>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" aria-hidden="true">
+              <rect x="1.5" y="1.5" width="13" height="13" rx="2"/><path d="M4.5 5h7M4.5 7.5h3"/>
+              <rect x="9" y="8" width="3" height="3" rx="0.4" fill="currentColor" stroke="none"/>
+            </svg>
+          </button>
+          <button id="editor-save" class="icon-btn" title="сохранить (ctrl+s)">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2.5 2.5h9l2 2v9h-11z"/><path d="M5 2.5v3.5h5V2.5M5 13.5V9.5h6v4"/>
+            </svg>
+          </button>
+        </div>
+        <div id="editor-main">
+          <div class="code-edit">
+            <pre class="gutter" aria-hidden="true"></pre>
+            <div class="code-area">
+              <pre class="code-view" aria-hidden="true"><code></code></pre>
+              <textarea id="editor-text" wrap="off" spellcheck="false" autocomplete="off"></textarea>
+            </div>
+          </div>
+          <div id="editor-preview" class="answer"></div>
+        </div>
+      </section>
+    </div>
 
     <footer id="statusbar"></footer>
   </div>
@@ -63,10 +98,19 @@
     </div>
   </div>
 
-  <div id="skillpanel" class="overlay side-panel" hidden>
-    <div class="dialog box">
-      <div class="box-title"><span id="skill-title">skill</span> <button class="title-btn" id="skill-close">×</button></div>
-      <div id="skill-body"></div>
+  <div id="settings" class="overlay" hidden>
+    <div class="dialog box settings-dialog">
+      <div class="box-title">настройки <button class="title-btn" id="settings-close" title="закрыть (Esc)">×</button></div>
+      <nav id="settings-tabs"></nav>
+      <div id="settings-body"></div>
+    </div>
+  </div>
+
+  <div id="ask" class="overlay" hidden>
+    <div class="dialog box small">
+      <div class="box-title" id="ask-title"></div>
+      <div id="ask-text"></div>
+      <div class="buttons" id="ask-buttons"></div>
     </div>
   </div>
 
@@ -77,6 +121,8 @@
       <ul id="switcher-list" class="list"></ul>
     </div>
   </div>
+
+  <div id="lightbox" class="overlay" hidden><img alt=""></div>
 
   <div id="popup" hidden></div>
 

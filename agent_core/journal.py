@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .config import LOGS_DIR
+
+IMAGES_IN_HISTORY = 2  # картинки только из стольких последних сообщений — каждая стоит сотни токенов
 
 
 # ----------------------------------------
@@ -63,10 +67,12 @@ class Journal:
     # ----------------------------------------
     # История для модели из последних записей журнала
     # ----------------------------------------
-    def messages(self, limit: int) -> list[dict[str, str]]:
+    def messages(self, limit: int) -> list[dict[str, Any]]:
+        records = self.records[-limit:]
+        with_images = [i for i, record in enumerate(records) if record.get("images")][-IMAGES_IN_HISTORY:]
         messages = []
-        for record in self.records[-limit:]:
-            message = record_to_message(record)
+        for index, record in enumerate(records):
+            message = record_to_message(record, images=index in with_images)
             if message:
                 messages.append(message)
         return messages
@@ -75,8 +81,13 @@ class Journal:
 # ----------------------------------------
 # Одна запись журнала → одно сообщение для модели
 # ----------------------------------------
-def record_to_message(record: dict[str, Any]) -> dict[str, str] | None:
+def record_to_message(record: dict[str, Any], images: bool = False) -> dict[str, Any] | None:
     kind = record["type"]
+    if kind == "user" and record.get("images"):
+        if not images:
+            return {"role": "user", "content": f"{record['text']}\n[картинок было: {len(record['images'])}]"}
+        return {"role": "user", "content": [{"type": "text", "text": record["text"]},
+                                            *(image_part(Path(path)) for path in record["images"])]}
     if kind == "user":
         return {"role": "user", "content": record["text"]}
     if kind == "call":
@@ -94,3 +105,15 @@ def record_to_message(record: dict[str, Any]) -> dict[str, str] | None:
     if kind == "note":
         return {"role": "user", "content": f"[система] {record['text']}"}
     return None
+
+
+# ----------------------------------------
+# Картинка для модели: data URL в формате OpenAI; файла уже нет — текстом
+# ----------------------------------------
+def image_part(path: Path) -> dict[str, Any]:
+    try:
+        data = base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError:
+        return {"type": "text", "text": f"[картинка {path.name} удалена]"}
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}

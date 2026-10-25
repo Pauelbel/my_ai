@@ -131,7 +131,6 @@ body.resizing { cursor: col-resize; user-select: none; }
 .list li:hover { background: var(--bg-hover); }
 .list li.active { color: var(--accent); }
 .list li .muted { color: var(--muted); }
-#skills li::before, #tools li::before { content: "· "; color: var(--muted); }
 
 /* кнопки в строке списка: видны при наведении (корзина у пространства, «вернуть» в корзине) */
 .list li { display: flex; align-items: center; gap: 2px; }
@@ -142,14 +141,15 @@ body.resizing { cursor: col-resize; user-select: none; }
 .row-btn.danger:hover { color: var(--error); }
 .row-btn svg { width: 1em; height: 1em; }
 
-/* настройки внизу левой колонки: свёрнуты — одна строка, раскрыты — группы со списками */
-#settings-box { padding: 10px 8px 4px; flex: none; }
-#settings { max-height: 46vh; overflow: auto; padding-top: 2px; }
-.group-head { display: block; width: 100%; text-align: left; color: var(--muted); padding: 2px 0; }
-.group-head:hover { color: var(--text); }
-.group .list { margin: 0 0 6px 10px; }
-.group.closed .list { display: none; }
-#tools .confirm { color: var(--working); margin-left: 4px; }
+/* кнопка настроек внизу левой колонки — открывает окно настроек */
+#settings-open {
+  flex: none;
+  text-align: left;
+  color: var(--muted);
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+}
+#settings-open:hover { color: var(--accent); border-color: var(--accent); }
 
 .dot { display: inline-block; width: 1.2em; text-align: center; }
 .dot.working, .dot.waiting { color: var(--working); }
@@ -389,9 +389,6 @@ body.resizing { cursor: col-resize; user-select: none; }
 #statusbar > span + span::before { content: " · "; color: var(--border); }
 #statusbar .clickable { cursor: pointer; color: var(--text); }
 #statusbar .clickable:hover { color: var(--accent); }
-.bar { letter-spacing: -1px; }
-.bar.warn { color: var(--working); }
-.bar.full { color: var(--error); }
 
 /* слои поверх ленты */
 
@@ -418,11 +415,58 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 .dialog.small { width: min(520px, 92vw); }
 .dialog .buttons { display: flex; gap: 12px; margin-top: 12px; }
-#confirm-body, #skill-body { overflow: auto; min-height: 0; }
+#confirm-body { overflow: auto; min-height: 0; }
 #confirm .box-title { color: var(--working); }
 
-.side-panel { justify-content: flex-end; align-items: stretch; padding: 10px; }
-.side-panel .dialog { width: min(760px, 80vw); max-height: none; }
+/* окно настроек: вкладки сверху, под ними содержимое вкладки */
+.settings-dialog { width: min(1040px, 94vw); height: min(720px, 88vh); max-height: none; }
+#settings-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin: 0 0 12px; flex: none; }
+.stab { color: var(--muted); padding: 4px 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.stab:hover { color: var(--text); }
+.stab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.stab .count { color: var(--muted); font-size: 0.85em; }
+#settings-body { flex: 1; min-height: 0; overflow: auto; }
+
+/* инструменты и скиллы: список слева, карточка справа */
+#settings-body.settings-tools, #settings-body.settings-skills {
+  display: grid;
+  grid-template-columns: minmax(170px, 230px) 1fr;
+  gap: 14px;
+  overflow: hidden;
+}
+.settings-list { overflow: auto; border-right: 1px solid var(--border); padding-right: 6px; }
+.settings-list li { padding: 3px 6px; }
+.settings-list .confirm { color: var(--working); margin-left: 4px; }
+.settings-detail { overflow: auto; min-width: 0; padding-right: 4px; }
+.detail-title { color: var(--text); font-weight: 700; margin-bottom: 4px; }
+
+/* подключение */
+.conn { display: flex; flex-direction: column; gap: 12px; max-width: 640px; }
+.conn-row { display: grid; grid-template-columns: 200px 1fr; gap: 2px 14px; align-items: center; }
+.conn-label { color: var(--muted); }
+.conn-hint { grid-column: 2; color: var(--muted); font-size: 0.85em; }
+.conn-input {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font: inherit;
+  padding: 3px 8px;
+  outline: none;
+  min-width: 0;
+}
+.conn-input:focus { border-color: var(--accent); }
+.conn-state { margin: 16px 0 0; }
+.conn-state.ok { color: var(--done); }
+.conn-state.warn { color: var(--working); }
+.conn-state.error { color: var(--error); }
+.meta.saved { color: var(--done); }
+
+/* корзина */
+.trash-list { margin-top: 10px; }
+.trash-list li { padding: 4px 6px; gap: 10px; }
+.trash-list li .label { flex: none; }
+.trash-list li .label.muted { flex: 1; font-size: 0.85em; }
+.trash-list .row-btn { visibility: visible; }
 
 .args { color: var(--muted); white-space: pre-wrap; word-break: break-word; margin: 0 0 8px; }
 
@@ -488,3 +532,105 @@ body.resizing { cursor: col-resize; user-select: none; }
 .memory-add:hover { color: var(--accent); }
 .buttons .meta { margin: 0 0 0 auto; align-self: center; }
 .meta.over { color: var(--error); }
+
+/* ---- файлы пространства: пространства сверху (сколько нужно), дерево — всё остальное место ---- */
+#spaces-box { flex: none; max-height: 30vh; display: flex; flex-direction: column; }
+#spaces-box > .list { overflow: auto; }
+.tree li { padding-top: 0; padding-bottom: 0; }
+.tree li .arrow { flex: none; width: 1.1em; color: var(--muted); }
+.tree li.dir .label { color: var(--text); }
+.tree li.file .label { color: var(--muted); }
+.tree li.file:hover .label, .tree li.active .label { color: var(--accent); }
+
+/* ---- окна поверх: подтверждение агента и вопрос — выше редактора ---- */
+#confirm { z-index: 30; }
+#ask { z-index: 40; }
+#ask-text { white-space: pre-wrap; word-break: break-word; }
+#ask-buttons button:focus { outline: 1px solid var(--accent); }
+
+/* ---- рабочая область: чат слева, редактор файлов справа (когда открыт хоть один файл) ---- */
+#work { display: flex; gap: 10px; min-width: 0; min-height: 0; }
+#work > #main { flex: 1 1 0; min-width: 320px; }
+#editor {
+  position: relative;
+  flex: 0 0 var(--editor-width, 50%);
+  max-width: calc(100% - 330px);
+  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 0 0;
+}
+#editor[hidden] { display: none; }
+#editor-resizer { position: absolute; top: 0; bottom: 0; left: -9px; width: 8px; cursor: col-resize; z-index: 4; }
+#editor-resizer:hover, #editor-resizer.dragging { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+#file-tabs .tab .dirty { color: var(--working); }
+#file-tabs .tab .close { visibility: visible; }
+
+.editor-bar { display: flex; align-items: center; gap: 10px; flex: none; padding: 0 10px 6px; min-width: 0; }
+#editor-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85em; }
+#editor-note { margin: 0; }
+.icon-btn { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); border-radius: 4px; flex: none; }
+.icon-btn:hover { color: var(--text); background: var(--bg-hover); }
+.icon-btn.active { color: var(--accent); background: var(--bg-hover); }
+.icon-btn[hidden] { display: none; }
+.icon-btn svg { width: 16px; height: 16px; }
+
+#editor-main { flex: 1; min-height: 0; display: flex; border-top: 1px solid var(--border); }
+#editor-main .code-edit { flex: 1; }
+#editor-preview { display: none; flex: 1; overflow: auto; min-width: 0; padding: 8px 16px; margin: 0; }
+#editor-main.preview .code-edit { display: none; }
+#editor-main.preview #editor-preview { display: block; }
+
+/* поле ввода прозрачное поверх подсвеченной копии текста: шрифт, отступы и переносы у них одни */
+.code-edit { display: flex; min-height: 0; min-width: 0; background: var(--bg-raised); }
+.code-area { position: relative; flex: 1; min-width: 0; }
+.gutter, .code-view, #editor-text {
+  margin: 0;
+  font: inherit;
+  line-height: 1.45;
+  tab-size: 4;
+  white-space: pre;
+  padding: 6px 10px 40px;
+}
+.gutter {
+  flex: none;
+  overflow: hidden;
+  color: var(--muted);
+  text-align: right;
+  user-select: none;
+  border-right: 1px solid var(--border);
+  min-width: 3.5em;
+}
+.code-view, #editor-text { position: absolute; inset: 0; overflow: hidden; }
+.code-view { padding-right: 40px; pointer-events: none; color: var(--text); }
+.code-view code { font: inherit; background: none; padding: 0; }
+#editor-text {
+  overflow: auto;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+  padding-bottom: 6px;
+}
+#editor-text::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); color: transparent; }
+
+/* ---- картинки в сообщении ---- */
+#attach { width: 22px; height: 26px; flex: none; color: var(--muted); display: inline-flex; align-items: center; }
+#attach:hover { color: var(--accent); }
+#attach svg { width: 18px; height: 18px; }
+#attachments { display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 12px 0; border-top: 1px solid var(--border); }
+#attachments[hidden] { display: none; }
+#attachments + #composer { border-top: 0; }
+.thumb { position: relative; }
+.thumb img { height: 64px; max-width: 160px; object-fit: cover; display: block; border: 1px solid var(--border); cursor: zoom-in; }
+.thumb-remove {
+  position: absolute; top: -7px; right: -7px; width: 18px; height: 18px; line-height: 16px; text-align: center;
+  border-radius: 50%; background: var(--bg); border: 1px solid var(--border); color: var(--muted); font-size: 12px;
+}
+.thumb-remove:hover { color: var(--error); border-color: var(--error); }
+.user-images { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 6px; }
+.user-images img { max-height: 180px; max-width: 320px; border: 1px solid var(--border); cursor: zoom-in; display: block; }
+#lightbox { z-index: 50; cursor: zoom-out; }
+#lightbox img { max-width: 94vw; max-height: 92vh; box-shadow: 0 6px 30px rgba(0, 0, 0, .35); }

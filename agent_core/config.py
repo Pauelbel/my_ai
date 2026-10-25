@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import platform
+import re
 import tomllib
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -25,7 +27,7 @@ class Config:
     model: str = "qwen3.5:9b-q8_0"
     base_url: str = "http://localhost:11434/v1"
     project_dir: Path = ROOT
-    max_steps: int = 10
+    max_steps: int = 20
     skill_timeout: int = 120
     output_limit: int = 4000
     memory_limit: int = 4000
@@ -50,3 +52,20 @@ class Config:
         if "project_dir" in data:
             data["project_dir"] = (ROOT / Path(data["project_dir"]).expanduser()).resolve()
         return cls(**data)
+
+    # ----------------------------------------
+    # Пишет ключи верхнего уровня в toml: строка «ключ = …» меняется, комментарий справа остаётся;
+    # нового ключа нет — добавляется перед первой секцией [..]
+    # ----------------------------------------
+    @staticmethod
+    def save(changes: dict[str, str | int | bool], path: Path = ROOT / "config.toml") -> None:
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        head, sep, tail = text.partition("\n[")  # секции [ui], [voice] не трогаем
+        for key, value in changes.items():
+            literal = json.dumps(value, ensure_ascii=False) if isinstance(value, str) else str(value).lower()
+            line = re.compile(rf"^{re.escape(key)}[ \t]*=[ \t]*(?:\"(?:[^\"\\\\]|\\\\.)*\"|[^#\n]*?)([ \t]*#.*)?$", re.M)
+            if line.search(head):
+                head = line.sub(lambda m: f"{key} = {literal}{m.group(1) or ''}", head, count=1)
+            else:
+                head = head.rstrip("\n") + f"\n{key} = {literal}\n" + ("\n" if sep else "")
+        path.write_text(head + sep + tail, encoding="utf-8")

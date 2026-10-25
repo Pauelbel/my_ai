@@ -7,15 +7,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .tools import trim
+from .tools.base import trim
 
 
 # ----------------------------------------
-# Событие для интерфейса; на confirm_request и need_skill UI отвечает agent.confirm(event.id, …)
+# Событие для интерфейса; на confirm_request, need_skill и continue_request UI отвечает agent.confirm(event.id, …)
 # ----------------------------------------
 @dataclass
 class Event:
-    type: str  # step | tool_result | token | thinking | answer | confirm_request | need_skill | error | status | info | warning
+    type: str  # step | tool_result | token | thinking | answer | confirm_request | need_skill | continue_request | error | status | info | warning
     text: str = ""
     data: dict[str, Any] = field(default_factory=dict)
     id: str = ""

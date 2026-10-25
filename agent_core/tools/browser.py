@@ -8,8 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import BROWSER_PROFILE, LOGS_DIR
-from .tools import Workspace, tool
+from ..config import BROWSER_PROFILE, LOGS_DIR
+from .base import Workspace, tool
 
 
 # ----------------------------------------
