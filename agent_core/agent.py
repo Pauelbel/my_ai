@@ -10,6 +10,7 @@ import threading
 import time
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Generator
 
 from .commands import load_commands, match_command
@@ -23,7 +24,7 @@ from .schemas import Action, Answer, Facts, NeedSkill, Reply
 from .service import ServiceCommands
 from .skill_flow import SkillFlow
 from .skills import SkillInfo, load_skills, run_skill
-from .tools import files, search, shell, remember, browser  # noqa: F401 — импорт регистрирует инструменты в TOOLS
+from .tools import files, search, shell, git, remember, browser  # noqa: F401 — импорт регистрирует инструменты в TOOLS
 from .tools.base import TOOLS, Tool, Workspace, trim
 from .tools.browser import Browser
 
@@ -32,6 +33,19 @@ from .tools.browser import Browser
 NO_NEW_SKILLS = re.compile(
     r"\bне\s+(нужн\w*|надо|став\w*|устанавлива\w*|создава\w*|пиш\w*)\b[^.!?\n]{0,50}(скилл|скрипт|пакет|библиотек)"
     r"|\bбез\s+(\w+\s+)?(скилл|скрипт|пакет|установк|библиотек)", re.IGNORECASE)
+
+RULES_FILE = "AGENTS.md"  # правила папки: лежат в корне пространства, попадают в системный промпт
+
+
+# ----------------------------------------
+# Текст AGENTS.md из корня папки (обрезан до limit); нет файла — пусто
+# ----------------------------------------
+def folder_rules(project_dir: Path, limit: int) -> str:
+    try:
+        text = (project_dir / RULES_FILE).read_text(encoding="utf-8-sig").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return trim(text, limit)
 
 
 # ----------------------------------------
@@ -48,6 +62,7 @@ class Agent(ServiceCommands, SkillFlow):
         self.memory = Memory()
         self.ws = Workspace(self.config, Browser.shared(self.config.headless), self.memory)
         self._skills = load_skills()
+        self.toolset: dict[str, Tool] = TOOLS  # инструменты, которые видит модель (у агента вики — свои)
         self.commands = load_commands()
         self.journal = Journal.new()
         self.approved: set[str] = set()
@@ -136,7 +151,7 @@ class Agent(ServiceCommands, SkillFlow):
     # Встроенные инструменты: имя, сигнатура, описание, правило подтверждения
     # ----------------------------------------
     def tools(self) -> list[Tool]:
-        return list(TOOLS.values())
+        return list(self.toolset.values())
 
     # ----------------------------------------
     # Долговременная память: факты списком (общая для всех агентов)
@@ -180,7 +195,7 @@ class Agent(ServiceCommands, SkillFlow):
     # ----------------------------------------
     def _quick(self, text: str, name: str, args: dict[str, str]) -> Generator[Event, None, None]:
         self.journal.write({"type": "user", "text": text})
-        if name not in self._skills and name not in TOOLS:
+        if name not in self._skills and name not in self.toolset:
             yield Event("error", f"Команда ссылается на скилл {name}, а его нет в skills/")
             self.journal.write({"type": "end"})
             return
@@ -350,8 +365,8 @@ class Agent(ServiceCommands, SkillFlow):
     def _execute(self, name: str, args: dict[str, Any]) -> Generator[Event, None, tuple[str, str | None]]:
         limit = self.config.output_limit
         try:
-            if name in TOOLS:
-                item = TOOLS[name]
+            if name in self.toolset:
+                item = self.toolset[name]
                 if item.confirm(args):
                     allowed = yield from self._confirm(name, args)
                     if not allowed:
@@ -392,17 +407,19 @@ class Agent(ServiceCommands, SkillFlow):
     # Имена, которые модель может вызвать: инструменты + скиллы
     # ----------------------------------------
     def _names(self) -> set[str]:
-        return set(TOOLS) | set(self._skills)
+        return set(self.toolset) | set(self._skills)
 
     # ----------------------------------------
     # Системный промпт + история из журнала
     # ----------------------------------------
     def _messages(self) -> list[dict[str, str]]:
-        tools = "\n".join(f"- {t.signature} — {t.description}" for t in TOOLS.values())
+        tools = "\n".join(f"- {t.signature} — {t.description}" for t in self.toolset.values())
         skills = "\n".join(f"- {s.signature} — {s.description}" for s in self._skills.values()) or "(пока нет)"
+        rules = folder_rules(self.config.project_dir, self.config.output_limit)
+        rules = f"Правила папки ({RULES_FILE}) — выполняй их:\n{rules}\n\n" if rules else ""
         system = SYSTEM_PROMPT.format(date=f"{datetime.now():%Y-%m-%d}", os=platform.system(),
                                       project=self.config.project_dir.name, tools=tools, skills=skills,
-                                      memory=self.memory.read() or "(пусто)")
+                                      rules=rules, memory=self.memory.read() or "(пусто)")
         return [{"role": "system", "content": system}, *self.journal.messages(self.config.history_limit)]
 
     # ----------------------------------------

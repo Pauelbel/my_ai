@@ -18,6 +18,19 @@
         <div class="box-title">spaces <button class="title-btn" id="add-space" title="открыть папку">+</button></div>
         <ul id="spaces" class="list"></ul>
       </section>
+      <section class="box" id="git-box">
+        <div class="box-title">git</div>
+        <div class="icon-bar">
+          <button id="git-btn" class="icon-btn" title="изменения git">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true">
+              <circle cx="4.5" cy="3.5" r="1.6"/><circle cx="4.5" cy="12.5" r="1.6"/><circle cx="11.5" cy="5.5" r="1.6"/>
+              <path d="M4.5 5.1v5.8M11.5 7.1c0 2.6-2.2 3.2-5.4 4.4"/>
+            </svg>
+            <span class="badge" hidden></span>
+          </button>
+        </div>
+        <ul id="changes" class="list tree" hidden></ul>
+      </section>
       <section class="box grow" id="files-box">
         <div class="box-title">files <button class="title-btn" id="files-refresh" title="обновить дерево">↻</button></div>
         <ul id="files" class="list tree"></ul>
@@ -79,6 +92,10 @@
             </div>
           </div>
           <div id="editor-preview" class="answer"></div>
+          <div id="diff-view">
+            <div class="diff-side" id="diff-left" tabindex="0"></div>
+            <div class="diff-side" id="diff-right" tabindex="0"></div>
+          </div>
         </div>
       </section>
     </div>

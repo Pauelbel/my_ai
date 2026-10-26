@@ -4,6 +4,7 @@
 
 const FOLD_LINES = 20;          // блоки кода длиннее — свёрнуты
 const STATUS_EVERY = 1000;      // строка статуса обновляется раз в секунду
+const GIT_EVERY = 3000;         // счётчик изменений git — раз в 3 секунды
 const FONT_DEFAULT = 14;
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -235,7 +236,7 @@ class Feed {
     switch (ev.type) {
       case "user": this.startTurn(ev.text, Date.now(), d.images || []); break;
       case "step": this.current().step(d.name, d.args); break;
-      case "tool_result": this.current().result(ev.text, d.error); break;
+      case "tool_result": this.current().result(ev.text, d.error); loadChanges(); break;
       case "thinking": this.current().thinking(ev.text); break;
       case "token": this.current().token(ev.text, d.reset); break;
       case "answer": this.current().answer(ev.text); break;
@@ -631,8 +632,9 @@ function render(state) {
   renderTabs();
   refreshSettings();
   loadTree();
+  loadChanges();
   for (const s of app.sessions) ensureFeed(s.id);
-  feeds.forEach((feed, id) => { feed.el.hidden = id !== app.session; });
+  feeds.forEach((feed, id) => { if (feed.el.parentElement === $("#feeds")) feed.el.hidden = id !== app.session; });  // лента вики — в своей колонке
   const feed = feeds.get(app.session);
   if (feed) feed.scroll();
 }
@@ -1042,12 +1044,14 @@ $("#add-space").onclick = () => api().open_space("").then((r) => r && r.ok && re
 
 // ======== файлы пространства: дерево в левой колонке ========
 
-const tree = { root: "", open: new Set(), load: 0 };  // корень (активное пространство), раскрытые папки, № загрузки
+const tree = { root: "", open: new Set(), load: 0, renaming: false, click: 0 };  // корень (активное пространство), раскрытые папки,
+                                                                              // № загрузки, идёт переименование, таймер клика
 
 // ----------------------------------------
 // Перерисовка дерева: корень и раскрытые папки читаются заново (агент мог добавить файлы)
 // ----------------------------------------
 async function loadTree() {
+  if (tree.renaming) return;  // перерисовка снесла бы поле ввода; после переименования дерево перечитается
   const space = app.spaces.find((s) => s.active);
   const root = space ? space.path : "";
   if (root !== tree.root) { tree.root = root; tree.open.clear(); showSpaceTabs(); }
@@ -1070,14 +1074,23 @@ async function treeRows(path, depth) {
     const li = el("li", (item.dir ? "dir" : "file") + (shown ? " active" : ""));
     li.style.paddingLeft = `${4 + depth * 14}px`;
     li.dataset.path = item.path;
-    li.append(el("span", "arrow", item.dir ? (open ? "▾" : "▸") : ""),
-              el("span", "label" + (item.name.startsWith(".") ? " muted" : ""), item.name));
+    const label = el("span", "label" + (item.name.startsWith(".") ? " muted" : ""), item.name);
+    const remove = el("button", "row-btn danger");
+    remove.innerHTML = TRASH_ICON;
+    remove.title = "удалить (в .trash/ пространства)";
+    remove.onclick = (e) => { e.stopPropagation(); askDelete(item); };
+    li.append(el("span", "arrow", item.dir ? (open ? "▾" : "▸") : ""), label, remove);
     li.title = item.path;
-    li.onclick = () => {
-      if (!item.dir) { openFile(item.path); return; }
-      if (open) tree.open.delete(item.path); else tree.open.add(item.path);
-      loadTree();
+    li.onclick = (e) => {  // одиночный клик ждёт: вдруг это начало двойного (переименование)
+      if (e.detail > 1) return;
+      clearTimeout(tree.click);
+      tree.click = setTimeout(() => {
+        if (!item.dir) { openFile(item.path); return; }
+        if (open) tree.open.delete(item.path); else tree.open.add(item.path);
+        loadTree();
+      }, 250);
     };
+    label.ondblclick = (e) => { e.stopPropagation(); clearTimeout(tree.click); startRename(item, label); };
     rows.push(li);
     if (open) rows.push(...await treeRows(item.path, depth + 1));
   }
@@ -1085,7 +1098,155 @@ async function treeRows(path, depth) {
   return rows;
 }
 
-$("#files-refresh").onclick = loadTree;
+$("#files-refresh").onclick = () => { loadTree(); loadChanges(); };
+
+// ----------------------------------------
+// Переименование по двойному клику: имя становится полем; Enter / уход фокуса — сохранить, Esc — отмена
+// ----------------------------------------
+function startRename(item, label) {
+  tree.renaming = true;
+  const field = el("input", "rename");
+  field.value = item.name;
+  label.replaceWith(field);
+  field.focus();
+  const dot = item.dir ? -1 : item.name.lastIndexOf(".");
+  field.setSelectionRange(0, dot > 0 ? dot : item.name.length);  // имя без расширения
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const name = field.value.trim();
+    if (save && name && name !== item.name) {
+      const r = await api().rename_file(item.path, name);
+      if (!r || !r.ok) ask("не переименовано", `${item.path}: ${r ? r.error : "нет ответа"}`, [["понятно", "primary"]]);
+      else movePaths(item.path, r.path);
+    }
+    tree.renaming = false;
+    loadTree();
+    loadChanges();
+  };
+  field.onkeydown = (e) => {
+    e.stopPropagation();  // Esc не должен останавливать агента, Enter — уходить в чат
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  };
+  field.onblur = () => finish(true);
+  field.onclick = field.ondblclick = (e) => e.stopPropagation();
+}
+
+// ----------------------------------------
+// После переименования: пути открытых вкладок и раскрытых папок — на новое имя
+// ----------------------------------------
+function movePaths(from, to) {
+  const moved = (path) => (path === from ? to : path.startsWith(from + "/") ? to + path.slice(from.length) : null);
+  for (const tab of spaceTabs().filter((tab) => !tab.kind && moved(tab.path))) {
+    tab.path = moved(tab.path);
+    tab.lang = fileLang(tab.path);
+    tab.md = /\.(md|markdown|mkd)$/i.test(tab.path);
+  }
+  tree.open = new Set([...tree.open].map((path) => moved(path) || path));
+  const tab = files.active;
+  if (tab && !tab.kind && tab.root === tree.root) {  // шапка открытой вкладки и подсветка — по новому имени
+    $("#editor-path").textContent = tab.path;
+    $("#editor-path").title = `${tab.root}/${tab.path}`;
+    $("#editor-preview-toggle").hidden = !tab.md;
+    if (!tab.md && tab.preview) setPreview(false);
+    files.frame = requestAnimationFrame(paintCode);
+  }
+  renderFileTabs();
+}
+
+// ----------------------------------------
+// Удаление из дерева после подтверждения: в .trash/ пространства; вкладки этого файла (папки) закрываются
+// ----------------------------------------
+function askDelete(item) {
+  const what = item.dir ? `папку ${item.path} со всем содержимым` : item.path;
+  ask("удаление", `Удалить ${what}?\nОно переместится в .trash/ пространства.`,
+      [["удалить", "primary", () => deleteItem(item)], ["отмена", ""]]);
+}
+
+async function deleteItem(item) {
+  const r = await api().delete_file(item.path);
+  if (!r || !r.ok) { ask("не удалено", `${item.path}: ${r ? r.error : "нет ответа"}`, [["понятно", "primary"]]); return; }
+  const inside = (path) => path === item.path || path.startsWith(item.path + "/");
+  for (const tab of spaceTabs().filter((tab) => !tab.kind && inside(tab.path))) {
+    tab.saved = tab === files.active ? editText.value : tab.text;  // файла больше нет — закрыть без вопроса о правках
+    closeTab(tab);
+  }
+  for (const path of [...tree.open]) if (inside(path)) tree.open.delete(path);
+  loadTree();
+  loadChanges();
+}
+
+// ======== git: счётчик и дерево изменённых файлов активного пространства ========
+
+const git = { open: false, repo: false, items: [], loading: false };  // дерево раскрыто; ответ git_changes; идёт запрос
+const GIT_STATUS = { M: "изменён", A: "добавлен", D: "удалён", R: "переименован", U: "новый" };
+
+// ----------------------------------------
+// Запрашивает изменения; пока прошлый запрос не вернулся — новый не шлётся
+// ----------------------------------------
+async function loadChanges() {
+  if (git.loading) return;
+  git.loading = true;
+  try {
+    const r = await api().git_changes();
+    if (r && JSON.stringify(r) !== JSON.stringify({ repo: git.repo, items: git.items })) {
+      git.repo = r.repo;
+      git.items = r.items;
+      renderChanges();
+    }
+  } finally {
+    git.loading = false;
+  }
+}
+
+// ----------------------------------------
+// Кружок со счётчиком на иконке и дерево изменений (если раскрыто)
+// ----------------------------------------
+function renderChanges() {
+  const btn = $("#git-btn"), badge = btn.querySelector(".badge");
+  if (!git.repo) git.open = false;
+  btn.classList.toggle("off", !git.repo);
+  btn.classList.toggle("active", git.open);
+  btn.title = git.repo ? `изменения git: ${git.items.length}` : "не git-репозиторий";
+  badge.textContent = git.items.length > 99 ? "99+" : String(git.items.length);
+  badge.hidden = !git.repo || !git.items.length;
+  const list = $("#changes");
+  list.hidden = !git.open;
+  if (!git.open) return;
+  if (!git.items.length) { list.replaceChildren(el("li", "muted", "изменений нет")); return; }
+  const rows = [], shown = new Set();
+  for (const item of git.items) {
+    const parts = item.path.split("/");
+    for (let depth = 0; depth < parts.length - 1; depth++) {  // папки пути, каждая один раз
+      const dir = parts.slice(0, depth + 1).join("/");
+      if (shown.has(dir)) continue;
+      shown.add(dir);
+      const li = el("li", "dir");
+      li.style.paddingLeft = `${4 + depth * 14}px`;
+      li.append(el("span", "arrow", "▾"), el("span", "label", parts[depth]));
+      li.title = dir;
+      rows.push(li);
+    }
+    const li = el("li", `file st-${item.status}`);
+    li.style.paddingLeft = `${4 + (parts.length - 1) * 14}px`;
+    li.dataset.path = item.path;
+    li.append(el("span", "arrow", ""), el("span", "label", parts[parts.length - 1]),
+              el("span", `st st-${item.status}`, item.status));
+    li.title = `${item.orig ? item.orig + " → " : ""}${item.path} · ${GIT_STATUS[item.status] || item.status}`;
+    li.onclick = () => openDiff(item.path, item.orig);
+    rows.push(li);
+  }
+  list.replaceChildren(...rows);
+  markTreeFile();
+}
+
+$("#git-btn").onclick = () => {
+  if (!git.repo) return;
+  git.open = !git.open;
+  renderChanges();
+};
 
 // ======== редактор файлов: панель справа от чата, вкладки — свои у каждого пространства ========
 
@@ -1114,6 +1275,7 @@ function spaceTabs() {
 // Есть ли у вкладки несохранённые правки (текст открытой — прямо из поля)
 // ----------------------------------------
 function tabDirty(tab) {
+  if (tab.kind === "diff") return false;
   return (tab === files.active ? editText.value : tab.text) !== tab.saved;
 }
 
@@ -1121,7 +1283,7 @@ function tabDirty(tab) {
 // Клик по файлу в дереве: уже открыт — на его вкладку, нет — читается и открывается новой
 // ----------------------------------------
 function openFile(path) {
-  const open = spaceTabs().find((tab) => tab.path === path);
+  const open = spaceTabs().find((tab) => tab.path === path && !tab.kind);
   if (open) { activateTab(open); return; }
   api().open_file(path, tree.root).then((r) => {
     if (!r.ok) { ask("файл не открыт", `${path}: ${r.error}`, [["понятно", "primary"]]); return; }
@@ -1139,6 +1301,7 @@ function openFile(path) {
 function stashTab() {
   const tab = files.active;
   if (!tab) return;
+  if (tab.kind === "diff") { tab.scroll = [$("#diff-left").scrollTop, $("#diff-left").scrollLeft]; return; }
   tab.text = editText.value;
   tab.scroll = [editText.scrollTop, editText.scrollLeft];
 }
@@ -1156,11 +1319,22 @@ function activateTab(tab) {
   $("#editor-path").title = `${tab.root}/${tab.path}`;
   $("#editor-note").textContent = "";
   $("#editor-preview-toggle").hidden = !tab.md;
-  setPreview(tab.preview);
-  [editText.scrollTop, editText.scrollLeft] = tab.scroll;
+  const diff = tab.kind === "diff";
+  $("#editor-main").classList.toggle("diff", diff);
+  $("#editor-save").hidden = diff;
+  if (diff) {
+    $("#editor-main").classList.remove("preview");
+    $("#editor-note").textContent = "HEAD ↔ сейчас";
+    renderDiff(tab);
+    [$("#diff-left").scrollTop, $("#diff-left").scrollLeft] = tab.scroll;
+  } else {
+    setPreview(tab.preview);
+    [editText.scrollTop, editText.scrollLeft] = tab.scroll;
+  }
   renderFileTabs();
   markTreeFile();
-  if (!tab.preview) editText.focus();
+  if (diff) $("#diff-left").focus();
+  else if (!tab.preview) editText.focus();
 }
 
 // ----------------------------------------
@@ -1171,7 +1345,7 @@ function renderFileTabs() {
   bar.textContent = "";
   for (const tab of spaceTabs()) {
     const el_ = el("span", "tab" + (tab === files.active ? " active" : ""));
-    el_.append(el("span", "", tab.path.split("/").pop()));
+    el_.append(el("span", "", tab.path.split("/").pop() + (tab.kind === "diff" ? " ↔" : "")));
     if (tabDirty(tab)) el_.append(el("span", "dirty", "●"));
     const close = el("button", "close", "×");
     close.title = "закрыть (ctrl+w)";
@@ -1229,8 +1403,65 @@ function showSpaceTabs() {
 // В дереве подсвечен открытый файл
 // ----------------------------------------
 function markTreeFile() {
-  const path = !$("#editor").hidden && files.active ? files.active.path : "";
+  const tab = !$("#editor").hidden && files.active, diff = tab && tab.kind === "diff";
+  const path = tab && !diff ? tab.path : "", changed = diff ? tab.path : "";
   document.querySelectorAll("#files li").forEach((li) => li.classList.toggle("active", li.dataset.path === path));
+  document.querySelectorAll("#changes li").forEach((li) => li.classList.toggle("active", li.dataset.path === changed));
+}
+
+// ----------------------------------------
+// Клик по файлу в дереве изменений: вкладка сравнения; уже открыта — строки перечитываются (файл мог поменяться)
+// ----------------------------------------
+function openDiff(path, orig = "") {
+  api().git_diff(path, orig).then((r) => {
+    if (!r.ok) { ask("сравнение не открыто", `${path}: ${r.error}`, [["понятно", "primary"]]); return; }
+    let tab = spaceTabs().find((t) => t.kind === "diff" && t.path === path);
+    if (tab) tab.rows = r.rows;
+    else {
+      tab = { root: r.root, path, kind: "diff", rows: r.rows, text: "", saved: "", mtime: "", crlf: false,
+              lang: fileLang(path), md: false, preview: false, scroll: [0, 0] };
+      files.tabs.push(tab);
+    }
+    activateTab(tab);
+  });
+}
+
+// ----------------------------------------
+// Две колонки сравнения: слева HEAD (удалённое красным), справа файл сейчас (добавленное зелёным)
+// ----------------------------------------
+function renderDiff(tab) {
+  const side = (no, text, kind) => {
+    const line = el("div", "diff-line " + (no === null ? "empty" : kind));
+    const tx = el("span", "tx");
+    if (no !== null && tab.lang !== "plaintext") tx.innerHTML = hljs.highlight(text, { language: tab.lang, ignoreIllegals: true }).value;
+    else tx.textContent = text;
+    line.append(el("span", "no", no === null ? "" : String(no)), tx);
+    return line;
+  };
+  const left = el("div", "diff-lines"), right = el("div", "diff-lines");
+  for (const [lno, ltext, rno, rtext, kind] of tab.rows) {
+    if (kind === "eol") {  // разница только в переводе строки в конце файла
+      left.append(el("div", "diff-line eol" + (ltext ? " del" : ""), ltext || " "));
+      right.append(el("div", "diff-line eol" + (rtext ? " add" : ""), rtext || " "));
+      continue;
+    }
+    left.append(side(lno, ltext, kind === "same" ? "" : "del"));
+    right.append(side(rno, rtext, kind === "same" ? "" : "add"));
+  }
+  if (!tab.rows.length) right.append(el("div", "diff-line muted", "  файлы одинаковые"));
+  $("#diff-left").replaceChildren(left);
+  $("#diff-right").replaceChildren(right);
+}
+
+// ----------------------------------------
+// Прокрутка одной колонки сравнения тянет другую
+// ----------------------------------------
+for (const [from, to] of [["#diff-left", "#diff-right"], ["#diff-right", "#diff-left"]]) {
+  $(from).addEventListener("scroll", () => {
+    const a = $(from), b = $(to);
+    if (b.scrollTop !== a.scrollTop) b.scrollTop = a.scrollTop;
+    if (b.scrollLeft !== a.scrollLeft) b.scrollLeft = a.scrollLeft;
+  });
 }
 
 // ----------------------------------------
@@ -1309,7 +1540,7 @@ editText.addEventListener("keydown", (e) => {
 // ----------------------------------------
 function saveFile(force = false) {
   const tab = files.active;
-  if (!tab) return Promise.resolve(false);
+  if (!tab || tab.kind === "diff") return Promise.resolve(false);
   const text = editText.value;
   return api().save_file(tab.path, text, tab.mtime, tab.crlf, force, tab.root).then((r) => {
     if (r.ok) {
@@ -1876,7 +2107,7 @@ document.addEventListener("keydown", (e) => {
     const inEditor = $("#editor").contains(document.activeElement);
     if (e.code === "KeyS") { e.preventDefault(); saveFile(); return; }
     if (e.code === "KeyW" && inEditor) { e.preventDefault(); closeTab(files.active); return; }
-    if (e.code === "KeyV" && e.shiftKey && files.active.md) { e.preventDefault(); setPreview(!files.active.preview); return; }
+    if (e.code === "KeyV" && e.shiftKey && files.active && files.active.md) { e.preventDefault(); setPreview(!files.active.preview); return; }
   }
   if (e.ctrlKey && !e.altKey) {
     const actions = {
@@ -1942,6 +2173,7 @@ window.addEventListener("pywebviewready", () => {
     render(state);
     pollStatus();
     setInterval(pollStatus, STATUS_EVERY);
+    setInterval(loadChanges, GIT_EVERY);
     focusInput();
   });
 });

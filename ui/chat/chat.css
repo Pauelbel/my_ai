@@ -536,11 +536,53 @@ body.resizing { cursor: col-resize; user-select: none; }
 /* ---- файлы пространства: пространства сверху (сколько нужно), дерево — всё остальное место ---- */
 #spaces-box { flex: none; max-height: 30vh; display: flex; flex-direction: column; }
 #spaces-box > .list { overflow: auto; }
+
+/* ---- git: строка иконок, счётчик изменений, дерево изменённых файлов ---- */
+#git-box { flex: none; max-height: 35vh; display: flex; flex-direction: column; padding-bottom: 4px; }
+#git-box > .list { flex: 1 1 auto; min-height: 0; overflow: auto; margin-top: 4px; }
+.icon-bar { display: flex; gap: 4px; flex: none; }
+.icon-bar .icon-btn { width: 30px; height: 28px; position: relative; }
+.icon-bar .icon-btn svg { width: 18px; height: 18px; }
+.icon-bar .icon-btn.off { opacity: 0.45; }
+.badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+.badge[hidden] { display: none; }
+#changes li .st { flex: none; width: 1.2em; text-align: center; font-weight: 700; }
+#changes li .st-M { color: var(--working); }
+#changes li .st-U, #changes li .st-A { color: var(--diff-add); }
+#changes li .st-D { color: var(--diff-del); }
+#changes li .st-R { color: var(--accent); }
+#changes li.file .label { color: var(--text); }
+#changes li.st-D .label { text-decoration: line-through; color: var(--muted); }
+#changes li.active .label { color: var(--accent); }
 .tree li { padding-top: 0; padding-bottom: 0; }
 .tree li .arrow { flex: none; width: 1.1em; color: var(--muted); }
 .tree li.dir .label { color: var(--text); }
 .tree li.file .label { color: var(--muted); }
 .tree li.file:hover .label, .tree li.active .label { color: var(--accent); }
+.tree li input.rename {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  padding: 0 2px;
+  outline: none;
+}
 
 /* ---- окна поверх: подтверждение агента и вопрос — выше редактора ---- */
 #confirm { z-index: 30; }
@@ -580,6 +622,23 @@ body.resizing { cursor: col-resize; user-select: none; }
 #editor-preview { display: none; flex: 1; overflow: auto; min-width: 0; padding: 8px 16px; margin: 0; }
 #editor-main.preview .code-edit { display: none; }
 #editor-main.preview #editor-preview { display: block; }
+
+/* сравнение «HEAD | сейчас»: две колонки, прокрутка общая, строки не переносятся — высоты совпадают */
+#diff-view { display: none; flex: 1; min-width: 0; min-height: 0; }
+#editor-main.diff .code-edit, #editor-main.diff #editor-preview { display: none; }
+#editor-main.diff #diff-view { display: flex; }
+.diff-side { flex: 1 1 0; min-width: 0; overflow: auto; background: var(--bg-raised); outline: none; }
+.diff-side + .diff-side { border-left: 1px solid var(--border); }
+.diff-lines { display: inline-block; min-width: 100%; padding: 4px 0; }
+.diff-line { display: flex; white-space: pre; min-height: 1.45em; line-height: 1.45em; }
+.diff-line .no { flex: none; width: 4.5ch; padding-right: 1ch; text-align: right; color: var(--muted); user-select: none; }
+.diff-line .tx { flex: 1; padding-right: 12px; }
+.diff-line.del { background: color-mix(in srgb, var(--diff-del) 18%, transparent); }
+.diff-line.add { background: color-mix(in srgb, var(--diff-add) 18%, transparent); }
+.diff-line.eol { padding-left: 5.5ch; color: var(--muted); font-style: italic; }
+.diff-line.empty {
+  background: repeating-linear-gradient(135deg, transparent 0 4px, color-mix(in srgb, var(--border) 45%, transparent) 4px 5px);
+}
 
 /* поле ввода прозрачное поверх подсвеченной копии текста: шрифт, отступы и переносы у них одни */
 .code-edit { display: flex; min-height: 0; min-width: 0; background: var(--bg-raised); }

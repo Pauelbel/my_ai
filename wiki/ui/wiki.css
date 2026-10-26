@@ -1,0 +1,186 @@
+/* Раздел «Вики»: поверх чата, раскладка как у чата: дерево | агент вики | заметка или граф (как редактор). */
+
+:root {
+  --wg-0: #58a6ff; --wg-1: #3fb950; --wg-2: #d29922; --wg-3: #db61a2;
+  --wg-4: #a371f7; --wg-5: #39c5cf; --wg-6: #f0883e; --wg-7: #8b949e;
+}
+:root[data-theme="light"] {
+  --wg-0: #0969da; --wg-1: #1a7f37; --wg-2: #9a6700; --wg-3: #bf3989;
+  --wg-4: #8250df; --wg-5: #1b7c83; --wg-6: #bc4c00; --wg-7: #6e7781;
+}
+
+#wiki-open {
+  flex: none;
+  text-align: left;
+  color: var(--muted);
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  margin-bottom: -6px;
+}
+#wiki-open:hover { color: var(--accent); border-color: var(--accent); }
+
+#wiki {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background: var(--bg);
+  display: grid;
+  grid-template-columns: var(--wiki-side-width, 240px) minmax(0, 1fr);
+  gap: 10px 8px;
+  padding: 10px 8px 8px;
+}
+#wiki[hidden] { display: none; }
+
+/* ---- дерево ---- */
+
+#wiki-side { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; }
+
+/* ручки ширины — как #side-resizer и #editor-resizer чата */
+.wresizer { position: absolute; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 4; }
+.wresizer:hover, .wresizer.dragging { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+#wiki-side-resizer { right: -8px; }
+#wiki-pane-resizer { left: -9px; }
+
+#wiki-work { display: flex; gap: 10px; min-width: 0; min-height: 0; }
+#wiki-work > #wiki-chat { flex: 1 1 0; min-width: 320px; }
+#wiki-filter {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  outline: none;
+}
+#wiki-filter:focus { border-color: var(--accent); }
+#wiki-tree { flex: 1; min-height: 0; overflow: auto; }
+#wiki-root { font-size: 0.8em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+
+.wrow {
+  display: flex;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  white-space: nowrap;
+  padding: 1px 4px;
+  color: var(--muted);
+}
+button.wrow:hover { background: var(--bg-hover); }
+.wrow.group { color: var(--text); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; }
+.wrow.group:first-child { margin-top: 0; }
+.wrow > span { white-space: pre; }
+.wrow .guide { color: var(--border); flex: none; }
+.wrow .mark { flex: none; color: var(--muted); }
+.wrow .label { overflow: hidden; text-overflow: ellipsis; }
+.wrow.note:hover .label { color: var(--accent); }
+.wrow.current .label, .wrow.current .mark { color: var(--accent); }
+.wrow.hit { flex-direction: column; align-items: flex-start; padding-left: 1.6em; }
+.wrow.hit .line { font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.wempty { padding: 6px 4px; }
+
+/* ---- заметка ---- */
+
+#wiki-center {
+  position: relative;
+  flex: 0 0 var(--wiki-pane-width, 50%);
+  max-width: calc(100% - 330px);
+  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-top: 10px;
+}
+#wiki-note { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#wiki-note[hidden] { display: none; }
+#wiki-bar { display: flex; align-items: center; gap: 10px; padding: 0 4px 6px; border-bottom: 1px solid var(--border); }
+#wiki-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#wiki-flash { color: var(--working); }
+#wiki-bar .title-btn[hidden] { display: none; }
+#wiki-bar .danger:hover { color: var(--error); }
+
+#wiki-view { flex: 1; min-height: 0; overflow: auto; padding: 10px 18px 24px; margin: 0; }
+#wiki-view[hidden] { display: none; }
+#wiki-view .wtitle { font-size: 1.35em; color: var(--text); margin: 4px 0 2px; }
+#wiki-view .wtitle::before { content: ""; }
+#wiki-view .wsummary { color: var(--muted); }
+#wiki-view .wmeta { font-size: 0.85em; margin: 4px 0 10px; }
+#wiki-view .wrelated { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 14px; }
+#wiki-view .chip { border: 1px solid var(--border); padding: 0 8px; text-decoration: none; }
+#wiki-view .chip:hover { border-color: var(--accent); }
+#wiki-view .wbody { border-top: 1px solid var(--border); padding-top: 6px; }
+#wiki-view .wmissing { color: var(--muted); border-bottom: 1px dashed var(--muted); cursor: help; }
+#wiki-view .wsource { white-space: pre-wrap; background: var(--bg-raised); border: 1px solid var(--border); padding: 10px; }
+
+#wiki-text {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  border: 0;
+  outline: none;
+  padding: 10px 18px;
+  font: inherit;
+  line-height: 1.5;
+  color: var(--text);
+  background: transparent;
+  tab-size: 2;
+}
+#wiki-text[hidden] { display: none; }
+
+/* ---- граф ---- */
+
+#wiki-graph { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+#wiki-graph[hidden] { display: none; }
+.wg-svg { width: 100%; height: 100%; display: block; cursor: grab; user-select: none; touch-action: none; }
+.wg-svg.panning { cursor: grabbing; }
+.wg-edge { stroke: var(--border); stroke-width: 1.2; vector-effect: non-scaling-stroke; transition: opacity 0.15s; }
+.wg-node { cursor: pointer; transition: opacity 0.15s; }
+.wg-node circle { stroke: var(--bg); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.wg-node text { fill: var(--text); font-size: 12px; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; text-anchor: middle; pointer-events: none; opacity: 0; transition: opacity 0.15s; }
+.wg-svg.labels .wg-node text { opacity: 0.85; }
+.wg-node.current circle { stroke: var(--text); stroke-width: 2.5; }
+.wg-node.current text { opacity: 1; font-weight: 700; }
+.wg-svg.focus .wg-node:not(.hl) { opacity: 0.2; }
+.wg-svg.focus .wg-edge:not(.hl) { opacity: 0.15; }
+.wg-svg.focus .wg-node.hl text { opacity: 1; }
+.wg-edge.hl { stroke: var(--accent); stroke-width: 1.8; }
+
+.wg-c0 { --wg: var(--wg-0); } .wg-c1 { --wg: var(--wg-1); } .wg-c2 { --wg: var(--wg-2); } .wg-c3 { --wg: var(--wg-3); }
+.wg-c4 { --wg: var(--wg-4); } .wg-c5 { --wg: var(--wg-5); } .wg-c6 { --wg: var(--wg-6); } .wg-c7 { --wg: var(--wg-7); }
+.wg-node circle { fill: var(--wg); }
+
+#wiki-legend {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 0.85em;
+  color: var(--muted);
+  pointer-events: none;
+}
+.wlegend { display: inline-flex; align-items: center; gap: 5px; }
+.wlegend i { width: 9px; height: 9px; border-radius: 50%; background: var(--wg); display: inline-block; }
+
+/* ---- агент вики ---- */
+
+#wiki-chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 10px 0 0; }
+#wiki-feed { flex: 1; min-height: 0; position: relative; }
+#wiki-composer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+}
+#wiki-composer .prompt { color: var(--accent); line-height: 1.45; }
+#wiki-input {
+  flex: 1;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+  max-height: 220px;
+}

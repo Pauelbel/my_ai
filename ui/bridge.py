@@ -26,6 +26,9 @@ from typing import Any, Callable
 from agent_core.agent import Agent
 from agent_core.config import ROOT, Config
 from agent_core.events import Event
+from ui.git_changes import changes, diff_rows
+from wiki.agent import WikiAgent
+from wiki.store import Wiki
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +40,9 @@ IS_WINDOWS = sys.platform == "win32"
 CONNECTION_KEYS = ("base_url", "model", "reasoning_effort", "skill_reasoning_effort")  # вкладка «Подключение»
 EFFORTS = ("none", "low", "medium", "high")
 HIDDEN_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache"}  # не в дереве
-UI_KEYS = ("font_size", "theme", "sidebar", "settings_tab", "sidebar_width", "editor_width")  # настройки окна чата
+UI_KEYS = ("font_size", "theme", "sidebar", "settings_tab", "sidebar_width", "editor_width",  # настройки окна чата
+           "wiki_open", "wiki_note", "wiki_tab", "wiki_closed",  # раздел «Вики»: открыт ли, заметка, вкладка,
+           "wiki_side_width", "wiki_pane_width")  # свёрнутые разделы, ширина дерева и заметки
 MAX_OPEN_BYTES = 2_000_000  # больше — редактор не открывает
 IMAGES_DIR = ROOT / "logs" / "images"  # картинки из чата: журнал сессии ссылается на них путями
 IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
@@ -260,9 +265,9 @@ class Session:
     # ----------------------------------------
     # Агент на папку пространства; заголовок вкладки — по первому сообщению
     # ----------------------------------------
-    def __init__(self, config: Config, folder: Path) -> None:
+    def __init__(self, config: Config, folder: Path, agent: Agent | None = None) -> None:
         self.id = secrets.token_hex(3)
-        self.agent = Agent(replace(config, project_dir=folder))
+        self.agent = agent or Agent(replace(config, project_dir=folder))
         self.title = "новая"
         self.thread: threading.Thread | None = None
         self.pending: set[str] = set()  # id событий, которые ждут confirm()
@@ -321,9 +326,14 @@ class ChatApi:
     # ----------------------------------------
     # config — базовый конфиг ядра; folders — пространства при старте; hooks — колбэки ui/app.py
     # ----------------------------------------
-    def __init__(self, config: Config, folders: list[Path], state: UiState) -> None:
+    def __init__(self, config: Config, folders: list[Path], state: UiState,
+                 wiki: dict[str, Any] | None = None) -> None:
         self._config = config
         self._state = state
+        wiki = wiki or {}
+        self._wiki = Wiki((ROOT / Path(str(wiki.get("dir") or "wiki_data")).expanduser()).resolve())
+        self._wiki_session = Session(config, self._wiki.root,
+                                     WikiAgent(config, self._wiki, str(wiki.get("model") or "")))
         self._spaces: dict[str, Space] = {}
         self._active = ""
         self._emitter: Emitter | None = None
@@ -468,6 +478,28 @@ class ChatApi:
         return {"ok": True, "root": str(root), "path": path, "items": items}
 
     # ----------------------------------------
+    # Изменённые файлы git в активном пространстве — для счётчика и дерева изменений
+    # ----------------------------------------
+    def git_changes(self) -> dict[str, Any]:
+        try:
+            root, _ = self._space_path("")
+        except (KeyError, ValueError):
+            return {"repo": False, "items": []}
+        return changes(root)
+
+    # ----------------------------------------
+    # Строки сравнения «HEAD | сейчас» для вкладки редактора; orig — старый путь у переименования
+    # ----------------------------------------
+    def git_diff(self, path: str, orig: str = "") -> dict[str, Any]:
+        try:
+            root, _ = self._space_path(path)
+            if orig:
+                self._space_path(orig)
+        except ValueError as error:
+            return {"ok": False, "error": str(error)}
+        return {**diff_rows(root, path, orig), "root": str(root)}
+
+    # ----------------------------------------
     # Текст файла для редактора; mtime — чтобы при сохранении заметить, что файл поменяли на диске
     # ----------------------------------------
     def open_file(self, path: str, root: str = "") -> dict[str, Any]:
@@ -499,6 +531,45 @@ class ChatApi:
             return {"ok": True, "mtime": str(full.stat().st_mtime_ns)}
         except (OSError, ValueError) as error:
             return {"ok": False, "error": str(error)}
+
+    # ----------------------------------------
+    # Удаление из дерева: файл или папка уезжает в .trash/ пространства, как у инструмента агента
+    # ----------------------------------------
+    def delete_file(self, path: str) -> dict[str, Any]:
+        try:
+            root, full = self._space_path(path)
+            if full == root:
+                raise ValueError("нельзя удалить саму папку пространства")
+            if not full.exists():
+                raise FileNotFoundError(f"{path} не существует")
+            trash = root / ".trash"
+            trash.mkdir(exist_ok=True)
+            target = trash / f"{datetime.now():%Y%m%d_%H%M%S}_{full.name}"
+            shutil.move(full, target)
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        return {"ok": True, "path": path, "trash": target.relative_to(root).as_posix()}
+
+    # ----------------------------------------
+    # Переименование из дерева: новое имя в той же папке; занятое имя — ошибка, не перезапись
+    # ----------------------------------------
+    def rename_file(self, path: str, name: str) -> dict[str, Any]:
+        name = str(name).strip()
+        try:
+            if not name or name in (".", "..") or "/" in name or "\\" in name:
+                raise ValueError(f"недопустимое имя «{name}»")
+            root, full = self._space_path(path)
+            if full == root:
+                raise ValueError("нельзя переименовать саму папку пространства")
+            if not full.exists():
+                raise FileNotFoundError(f"{path} не существует")
+            target = full.with_name(name)
+            if target.exists() and target != full:
+                raise FileExistsError(f"{name} уже есть в этой папке")
+            full.rename(target)
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        return {"ok": True, "path": target.relative_to(root).as_posix()}
 
     # ----------------------------------------
     # Картинка сообщения для ленты: data URL (страница открыта по http — file:// ей недоступен); только из logs/images/
@@ -777,6 +848,62 @@ class ChatApi:
             return {"ok": False, "error": str(error)}
         return {"ok": True}
 
+    # ======== вики ========
+
+    # ----------------------------------------
+    # Раздел «Вики»: сессия агента вики, дерево заметок, папка, модель
+    # ----------------------------------------
+    def wiki_state(self) -> dict[str, Any]:
+        agent = self._wiki_session.agent
+        return {"session": self._wiki_session.id, "tree": self._wiki.tree(), "root": str(self._wiki.root),
+                "model": agent.config.model, "busy": self._wiki_session.busy,
+                "ui": {key: self._state.get(key) for key in UI_KEYS if key.startswith("wiki_")}}
+
+    # ----------------------------------------
+    # Заметка для просмотра и правки
+    # ----------------------------------------
+    def wiki_note(self, name: str) -> dict[str, Any]:
+        return self._wiki_call(lambda: self._wiki.note(name))
+
+    # ----------------------------------------
+    # Сохранение из редактора вики; mtime — когда заметку открыли (проверка, что её не меняли)
+    # ----------------------------------------
+    def wiki_save(self, name: str, text: str, mtime: str = "") -> dict[str, Any]:
+        return self._wiki_call(lambda: {"mtime": self._wiki.write(name, str(text), str(mtime))})
+
+    # ----------------------------------------
+    # Удаление заметки (в .trash/ вики)
+    # ----------------------------------------
+    def wiki_delete(self, name: str) -> dict[str, Any]:
+        return self._wiki_call(lambda: self._wiki.delete(name) or {})
+
+    # ----------------------------------------
+    # Граф: точки и линии
+    # ----------------------------------------
+    def wiki_graph(self) -> dict[str, Any]:
+        return self._wiki_call(self._wiki.graph)
+
+    # ----------------------------------------
+    # Поиск по тексту заметок (фильтр по названиям дерево делает само)
+    # ----------------------------------------
+    def wiki_search(self, query: str) -> dict[str, Any]:
+        return self._wiki_call(lambda: {"hits": self._wiki.search(str(query))})
+
+    # ----------------------------------------
+    # Сырой источник заметки (raw/…)
+    # ----------------------------------------
+    def wiki_source(self, path: str) -> dict[str, Any]:
+        return self._wiki_call(lambda: {"path": path, "text": self._wiki.source(str(path))})
+
+    # ----------------------------------------
+    # Вызов вики: ошибка — {"ok": False, "error": …} для окна, а не исключение в pywebview
+    # ----------------------------------------
+    def _wiki_call(self, call: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        try:
+            return {"ok": True, **call()}
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+
     # ======== внутреннее ========
 
     # ----------------------------------------
@@ -840,7 +967,7 @@ class ChatApi:
     # Все сессии всех пространств
     # ----------------------------------------
     def _all_sessions(self) -> list[Session]:
-        return [session for space in self._spaces.values() for session in space.sessions]
+        return [session for space in self._spaces.values() for session in space.sessions] + [self._wiki_session]
 
     # ----------------------------------------
     # Вкладки активного пространства

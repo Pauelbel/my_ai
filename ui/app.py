@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent_core.config import ROOT, Config
+from wiki.assets import page_script as wiki_page_script
 
 from .bridge import UI_DIR, ChatApi, UiState, WidgetApi, WidgetPort
 from .cursor import CursorTracker
@@ -52,7 +53,7 @@ class App:
         self.state = UiState()
         self.show_chat = show_chat
         self.chat_visible = show_chat
-        self.chat_api = ChatApi(self.core, self._folders(), self.state)
+        self.chat_api = ChatApi(self.core, self._folders(), self.state, load_section("wiki"))
         self.voice: Any = None
         try:
             from voice.assistant import VoiceAssistant
@@ -107,6 +108,7 @@ class App:
             width=int(self.ui.get("chat_width", 1100)), height=int(self.ui.get("chat_height", 750)),
             min_size=(640, 420), hidden=not self.show_chat, background_color="#0d1117", text_select=True)
         self.chat.events.closing += self._chat_closing
+        self.chat.events.loaded += self._load_wiki  # раздел «Вики» — из wiki/ui/, сервер окна отдаёт только ui/
         self.chat.events.minimized += self._show_head  # чат свернули — голова снова на экране
         self.chat.events.restored += self._sync_head
         self.widget.events.closing += self._widget_closing
@@ -182,6 +184,15 @@ class App:
         self.chat_visible = True
         self.widget.hide()
         self.chat.run_js("window.focusInput && window.focusInput()")
+
+    # ----------------------------------------
+    # Страница чата загрузилась — подключить раздел «Вики» (стили и скрипты из wiki/ui/)
+    # ----------------------------------------
+    def _load_wiki(self) -> None:
+        try:
+            self.chat.run_js(wiki_page_script())
+        except Exception:
+            log.exception("Раздел «Вики» не подключился")
 
     # ----------------------------------------
     # Голова снова на экране (чат закрыт или свёрнут)

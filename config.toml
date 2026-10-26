@@ -24,6 +24,10 @@ chat_width = 1100
 chat_height = 750
 follow_mouse = true      # глаза виджета следят за курсором по всему экрану
 
+[wiki]
+dir = "wiki_data"        # папка вики: notes/, raw/, index.md, log.md (относительная — от папки агента)
+model = "qwen3.5:35b-a3b" # модель агента вики; пусто — модель ядра (9b путает разделы и выдумывает факты)
+
 [voice]
 whisper_model = "small"  # faster-whisper: tiny | base | small | medium
 language = "ru"

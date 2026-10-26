@@ -12,3 +12,7 @@ skill = "run_pytest"
 [[command]]
 patterns = ["/git", "статус гита"]
 skill = "git_status"
+
+[[command]]
+patterns = ["/коммит {message}", "закоммить {message}"]
+skill = "git_commit"   # встроенный инструмент, спрашивает подтверждение
