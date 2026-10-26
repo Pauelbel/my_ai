@@ -19,15 +19,15 @@
 }
 #wiki-open:hover { color: var(--accent); border-color: var(--accent); }
 
+/* раздел встаёт в сетку окна вместо колонки и ленты чата; строка статуса под ним — общая */
+#app.wiki-open > #side, #app.wiki-open > #work { display: none; }
 #wiki {
-  position: fixed;
-  inset: 0;
-  z-index: 10;
-  background: var(--bg);
+  grid-column: 1 / -1;
+  grid-row: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: var(--wiki-side-width, 240px) minmax(0, 1fr);
   gap: 10px 8px;
-  padding: 10px 8px 8px;
 }
 #wiki[hidden] { display: none; }
 
@@ -42,7 +42,7 @@
 #wiki-pane-resizer { left: -9px; }
 
 #wiki-work { display: flex; gap: 10px; min-width: 0; min-height: 0; }
-#wiki-work > #wiki-chat { flex: 1 1 0; min-width: 320px; }
+#wiki-work > #main { flex: 1 1 0; min-width: 320px; }  /* чат окна — тот же блок, что у вкладок */
 #wiki-filter {
   font: inherit;
   color: var(--text);
@@ -97,16 +97,69 @@ button.wrow:hover { background: var(--bg-hover); }
 #wiki-bar .title-btn[hidden] { display: none; }
 #wiki-bar .danger:hover { color: var(--error); }
 
-#wiki-view { flex: 1; min-height: 0; overflow: auto; padding: 10px 18px 24px; margin: 0; }
+/* заметка для чтения: обычный шрифт, просторные строки, текст не шире ~80 знаков; код — моноширинный */
+#wiki-view {
+  --wiki-read: "Inter", "Segoe UI", system-ui, -apple-system, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 28px 40px;
+  margin: 0;
+  font-family: var(--wiki-read);
+  font-size: calc(var(--font-size) + 1px);
+  line-height: 1.65;
+}
+#wiki-view > * { max-width: 860px; }
 #wiki-view[hidden] { display: none; }
-#wiki-view .wtitle { font-size: 1.35em; color: var(--text); margin: 4px 0 2px; }
+#wiki-view .wtitle { font-size: 1.7em; font-weight: 650; line-height: 1.25; color: var(--text); margin: 0 0 4px; }
 #wiki-view .wtitle::before { content: ""; }
-#wiki-view .wsummary { color: var(--muted); }
-#wiki-view .wmeta { font-size: 0.85em; margin: 4px 0 10px; }
-#wiki-view .wrelated { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 14px; }
-#wiki-view .chip { border: 1px solid var(--border); padding: 0 8px; text-decoration: none; }
+#wiki-view .wsummary { color: var(--muted); font-size: 1.05em; }
+#wiki-view .wmeta { font-size: 0.85em; margin: 6px 0 12px; }
+
+#wiki-view .wbody h1, #wiki-view .wbody h2, #wiki-view .wbody h3, #wiki-view .wbody h4 {
+  color: var(--text); font-weight: 650; line-height: 1.3; margin: 1.5em 0 0.5em;
+}
+#wiki-view .wbody h1::before, #wiki-view .wbody h2::before, #wiki-view .wbody h3::before { content: ""; }
+#wiki-view .wbody h1 { font-size: 1.45em; }
+#wiki-view .wbody h2 { font-size: 1.25em; padding-bottom: 0.25em; border-bottom: 1px solid var(--border); }
+#wiki-view .wbody h3 { font-size: 1.08em; }
+#wiki-view .wbody h4 { font-size: 1em; color: var(--muted); }
+#wiki-view .wbody > :first-child { margin-top: 0.6em; }
+#wiki-view .wbody p { margin: 0.6em 0; }
+#wiki-view .wbody ul, #wiki-view .wbody ol { padding-left: 1.5em; margin: 0.5em 0 0.8em; }
+#wiki-view .wbody li { margin: 0.25em 0; }
+#wiki-view .wbody li::marker { color: var(--muted); }
+#wiki-view .wbody a { text-decoration: none; }
+#wiki-view .wbody a:hover { text-decoration: underline; }
+#wiki-view .wbody strong { font-weight: 650; }
+#wiki-view .wbody blockquote { margin: 0.8em 0; padding: 0.2em 0 0.2em 14px; border-left: 3px solid var(--border); color: var(--muted); }
+#wiki-view .wbody hr { border: 0; border-top: 1px solid var(--border); margin: 1.4em 0; }
+#wiki-view .wbody :not(pre) > code {
+  font-family: var(--font); font-size: 0.88em; color: var(--text);
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 4px; padding: 0.05em 0.35em;
+}
+#wiki-view .wbody table { border-collapse: collapse; margin: 0.8em 0; font-size: 0.95em; }
+#wiki-view .wbody th, #wiki-view .wbody td { border: 1px solid var(--border); padding: 5px 12px; text-align: left; vertical-align: top; }
+#wiki-view .wbody th { background: var(--bg-raised); font-weight: 650; }
+#wiki-view .wbody tr:nth-child(even) td { background: color-mix(in srgb, var(--bg-raised) 50%, transparent); }
+
+/* блок кода: плашка вместо рамки с подписями на линии; язык и «копировать» — справа сверху */
+#wiki-view .code {
+  position: relative; margin: 0.6em 0 1em; font-family: var(--font); font-size: 0.9em; line-height: 1.5;
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px;
+}
+#wiki-view .code pre { padding: 10px 14px; }
+#wiki-view .code .lang, #wiki-view .code .copy {
+  top: 5px; padding: 1px 6px; font-size: 0.8em; background: var(--bg-raised); border-radius: 4px;
+  opacity: 0; transition: opacity 0.15s;
+}
+#wiki-view .code .lang { left: auto; right: 94px; }
+#wiki-view .code .copy { right: 8px; }
+#wiki-view .code:hover .lang, #wiki-view .code:hover .copy { opacity: 1; }
+#wiki-view .wrelated { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 16px; font-size: 0.9em; }
+#wiki-view .chip { border: 1px solid var(--border); border-radius: 12px; padding: 0 10px; text-decoration: none; }
 #wiki-view .chip:hover { border-color: var(--accent); }
-#wiki-view .wbody { border-top: 1px solid var(--border); padding-top: 6px; }
+#wiki-view .wbody { border-top: 1px solid var(--border); padding-top: 4px; }
 #wiki-view .wmissing { color: var(--muted); border-bottom: 1px dashed var(--muted); cursor: help; }
 #wiki-view .wsource { white-space: pre-wrap; background: var(--bg-raised); border: 1px solid var(--border); padding: 10px; }
 
@@ -161,26 +214,6 @@ button.wrow:hover { background: var(--bg-hover); }
 .wlegend { display: inline-flex; align-items: center; gap: 5px; }
 .wlegend i { width: 9px; height: 9px; border-radius: 50%; background: var(--wg); display: inline-block; }
 
-/* ---- агент вики ---- */
-
-#wiki-chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 10px 0 0; }
-#wiki-feed { flex: 1; min-height: 0; position: relative; }
-#wiki-composer {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  border-top: 1px solid var(--border);
-  padding: 8px 12px;
-}
-#wiki-composer .prompt { color: var(--accent); line-height: 1.45; }
-#wiki-input {
-  flex: 1;
-  resize: none;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  line-height: 1.45;
-  max-height: 220px;
-}
+/* ссылка на заметку в ленте агента вики: название как в дереве */
+.wiki-ref { color: var(--accent); text-decoration: none; border-bottom: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent); }
+.wiki-ref:hover { border-bottom-style: solid; }

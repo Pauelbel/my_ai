@@ -6,6 +6,7 @@ const FOLD_LINES = 20;          // блоки кода длиннее — свё
 const STATUS_EVERY = 1000;      // строка статуса обновляется раз в секунду
 const GIT_EVERY = 3000;         // счётчик изменений git — раз в 3 секунды
 const FONT_DEFAULT = 14;
+const IMAGE_FILE = /\.(png|jpe?g|webp|gif|svg|bmp|ico)$/i;  // открываются в редакторе как картинка
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const feeds = new Map();        // id сессии → Feed
@@ -112,6 +113,35 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 function renderMarkdown(target, text) {
   target.innerHTML = DOMPurify.sanitize(marked.parse(text || ""));
   target.querySelectorAll("pre > code").forEach((code) => decorateCode(code));
+}
+
+// ----------------------------------------
+// Картинки в отрисованном Markdown: относительный путь (от папки файла base) грузит load(path) → data URL,
+// потому что окно отдаёт только ui/; щелчок — крупно. Внешние (http, data) остаются как есть
+// ----------------------------------------
+function showImages(target, base, load) {
+  target.querySelectorAll("img").forEach((img) => {
+    img.classList.add("md-image");
+    img.onclick = () => { if (img.src) showImage(img.src); };
+    const src = img.getAttribute("src") || "";
+    if (!src || /^(data|https?|blob):/i.test(src)) return;
+    const path = joinPath(base, decodeURIComponent(src.split(/[?#]/)[0]));
+    img.removeAttribute("src");
+    img.title = path;
+    load(path).then((url) => { if (url) img.src = url; else img.alt = `нет картинки ${path}`; });
+  });
+}
+
+// ----------------------------------------
+// Путь rel от папки base: «..» поднимается, «.» пропускается
+// ----------------------------------------
+function joinPath(base, rel) {
+  const parts = base ? base.split("/") : [];
+  for (const part of rel.split("/")) {
+    if (part === "..") parts.pop();
+    else if (part && part !== ".") parts.push(part);
+  }
+  return parts.join("/");
 }
 
 // ----------------------------------------
@@ -302,9 +332,9 @@ class Turn {
     this.answerEl = null;
     this.draft = "";
     this.answered = false;
-    this.newBlock();
     this.waited = 0;          // мс, пока ждали ответа пользователя — не входят в «Думал»
-    this.waitFrom = null;
+    this.waitFrom = null;     // (до newBlock: он сразу рисует заголовок со временем)
+    this.newBlock();
     this.timer = setInterval(() => this.updateHeads(), 1000);
   }
 
@@ -408,12 +438,20 @@ class Turn {
   }
 
   // ----------------------------------------
-  // Ход мыслей модели — приглушённым курсивом
+  // Ход мыслей модели — приглушённым курсивом, свёрнут под «▸ размышления»
   // ----------------------------------------
   thinking(text) {
-    if (!this.thinkingEl) {
+    if (!this.thinkingEl) {  // свёрнуто: «▸ размышления», щелчок раскрывает текст
+      const box = el("div", "thinking-box collapsed");
+      const head = el("button", "thinking-head", "▸ размышления");
+      head.onclick = () => {
+        const closed = box.classList.toggle("collapsed");
+        head.textContent = `${closed ? "▸" : "▾"} размышления`;
+        this.feed.scroll();
+      };
       this.thinkingEl = el("div", "thinking");
-      this.block().body.append(this.thinkingEl);
+      box.append(head, this.thinkingEl);
+      this.block().body.append(box);
     }
     this.thinkingEl.textContent += text;
     this.feed.scroll();
@@ -667,15 +705,18 @@ function renderTabs() {
   for (const s of app.sessions) {
     const tab = el("span", "tab" + (s.active ? " active" : ""));
     tab.append(el("span", `dot ${s.busy ? "working" : s.state}`, "●"), el("span", "", s.title));
-    const close = el("button", "close", "×");
-    close.title = "закрыть сессию";
-    close.onclick = (e) => { e.stopPropagation(); closeSession(s.id); };
-    tab.append(close);
+    if (!s.wiki) {  // агента вики не закрыть: раздел «Вики» держит его всегда
+      const close = el("button", "close", "×");
+      close.title = "закрыть сессию";
+      close.onclick = (e) => { e.stopPropagation(); closeSession(s.id); };
+      tab.append(close);
+    }
     tab.onclick = () => api().select_session(s.id).then(render).then(focusInput);
     tabs.append(tab);
   }
-  const add = el("span", "tab add", "+");
-  add.title = "новая сессия (ctrl+n)";
+  const wiki = app.sessions.some((s) => s.wiki);
+  const add = el("span", "tab add", wiki ? "очистить" : "+");
+  add.title = wiki ? "новый разговор с агентом вики — заметки остаются (ctrl+n)" : "новая сессия (ctrl+n)";
   add.onclick = newSession;
   tabs.append(add);
 }
@@ -1275,7 +1316,7 @@ function spaceTabs() {
 // Есть ли у вкладки несохранённые правки (текст открытой — прямо из поля)
 // ----------------------------------------
 function tabDirty(tab) {
-  if (tab.kind === "diff") return false;
+  if (tab.kind === "diff" || tab.kind === "image") return false;
   return (tab === files.active ? editText.value : tab.text) !== tab.saved;
 }
 
@@ -1283,8 +1324,17 @@ function tabDirty(tab) {
 // Клик по файлу в дереве: уже открыт — на его вкладку, нет — читается и открывается новой
 // ----------------------------------------
 function openFile(path) {
-  const open = spaceTabs().find((tab) => tab.path === path && !tab.kind);
+  const open = spaceTabs().find((tab) => tab.path === path && (!tab.kind || tab.kind === "image"));
   if (open) { activateTab(open); return; }
+  if (IMAGE_FILE.test(path)) {  // картинка — вкладка-просмотр, не текст
+    api().file_image(path, tree.root).then((url) => {
+      if (!url) { ask("картинка не открыта", `${path}: не картинка или больше 10 МБ`, [["понятно", "primary"]]); return; }
+      const tab = { root: tree.root, path, text: "", saved: "", kind: "image", url, lang: "plaintext", scroll: [0, 0] };
+      files.tabs.push(tab);
+      activateTab(tab);
+    });
+    return;
+  }
   api().open_file(path, tree.root).then((r) => {
     if (!r.ok) { ask("файл не открыт", `${path}: ${r.error}`, [["понятно", "primary"]]); return; }
     const md = /\.(md|markdown|mkd)$/i.test(path);
@@ -1302,6 +1352,7 @@ function stashTab() {
   const tab = files.active;
   if (!tab) return;
   if (tab.kind === "diff") { tab.scroll = [$("#diff-left").scrollTop, $("#diff-left").scrollLeft]; return; }
+  if (tab.kind === "image") return;
   tab.text = editText.value;
   tab.scroll = [editText.scrollTop, editText.scrollLeft];
 }
@@ -1319,10 +1370,19 @@ function activateTab(tab) {
   $("#editor-path").title = `${tab.root}/${tab.path}`;
   $("#editor-note").textContent = "";
   $("#editor-preview-toggle").hidden = !tab.md;
-  const diff = tab.kind === "diff";
+  const diff = tab.kind === "diff", image = tab.kind === "image";
   $("#editor-main").classList.toggle("diff", diff);
-  $("#editor-save").hidden = diff;
-  if (diff) {
+  $("#editor-main").classList.toggle("image", image);
+  $("#editor-save").hidden = diff || image;
+  if (image) {
+    $("#editor-main").classList.add("preview");
+    const img = el("img", "editor-image");
+    img.src = tab.url;
+    img.title = "крупно — щелчок";
+    img.onclick = () => showImage(tab.url);
+    $("#editor-preview").replaceChildren(img);
+    $("#editor-note").textContent = "картинка — только просмотр";
+  } else if (diff) {
     $("#editor-main").classList.remove("preview");
     $("#editor-note").textContent = "HEAD ↔ сейчас";
     renderDiff(tab);
@@ -1473,7 +1533,10 @@ function setPreview(on) {
   $("#editor-main").classList.toggle("preview", tab.preview);
   $("#editor-preview-toggle").classList.toggle("active", tab.preview);
   $("#editor-preview-toggle").title = tab.preview ? "исходный текст (ctrl+shift+v)" : "просмотр Markdown (ctrl+shift+v)";
-  if (tab.preview) renderMarkdown($("#editor-preview"), editText.value);
+  if (tab.preview) {
+    renderMarkdown($("#editor-preview"), editText.value);
+    showImages($("#editor-preview"), tab.path.split("/").slice(0, -1).join("/"), (path) => api().file_image(path, tab.root));
+  }
   else { refreshEditor(); editText.focus(); }
 }
 
@@ -1540,7 +1603,7 @@ editText.addEventListener("keydown", (e) => {
 // ----------------------------------------
 function saveFile(force = false) {
   const tab = files.active;
-  if (!tab || tab.kind === "diff") return Promise.resolve(false);
+  if (!tab || tab.kind === "diff" || tab.kind === "image") return Promise.resolve(false);
   const text = editText.value;
   return api().save_file(tab.path, text, tab.mtime, tab.crlf, force, tab.root).then((r) => {
     if (r.ok) {
@@ -1869,7 +1932,7 @@ function pollStatus() {
 }
 
 // ----------------------------------------
-// Модель · ток/с · шаг · время · папка · ветка · подтверждения · GPU · тема
+// Модель · ток/с · шаг · контекст · время · папка · ветка · подтверждения · GPU · тема
 // ----------------------------------------
 function renderStatus(data) {
   const s = data.status;
@@ -1880,6 +1943,7 @@ function renderStatus(data) {
   model.onclick = (e) => showModels(e);
   part(`${Math.round(s.tokens_per_sec)} t/s`);
   part(`шаг ${s.step}/${s.max_steps}`);
+  bar.append(contextMeter(s));
   part(clock(s.session_seconds), "", `сессия ${s.session}`);
   part(s.project.split(/[\\/]/).pop() || s.project, "", s.project);
   if (s.branch) part(`⎇ ${s.branch}`);
@@ -1887,6 +1951,28 @@ function renderStatus(data) {
   if (data.gpu) part(data.gpu);
   const theme = part(app.ui.theme === "light" ? "☀" : "◐", "clickable", "тема: светлая / тёмная");
   theme.onclick = () => setTheme(app.ui.theme === "light" ? "dark" : "light");
+}
+
+// ----------------------------------------
+// Занятый контекст: полоска и «12k/32k» по последнему запросу; к концу окна — жёлтая, потом красная
+// ----------------------------------------
+function contextMeter(s) {
+  const box = el("span", "ctx");
+  if (!s.context_max) {
+    box.textContent = `контекст ${s.context_used ? short(s.context_used) : "—"}`;
+    box.title = "окно модели пока неизвестно: Ollama сообщает его после первого запроса";
+    return box;
+  }
+  const share = Math.min(1, s.context_used / s.context_max);
+  if (share > 0.95) box.classList.add("full");
+  else if (share > 0.8) box.classList.add("high");
+  const meter = el("i", "meter");
+  const fill = el("b");
+  fill.style.width = `${Math.round(share * 100)}%`;
+  meter.append(fill);
+  box.append("контекст", meter, `${short(s.context_used)}/${short(s.context_max)}`);
+  box.title = `занято ${s.context_used} из ${s.context_max} токенов окна модели (${Math.round(share * 100)}%) — по последнему запросу`;
+  return box;
 }
 
 // ----------------------------------------

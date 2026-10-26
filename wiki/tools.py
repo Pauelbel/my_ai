@@ -1,4 +1,4 @@
-"""Инструменты агента вики: прочитать, найти, создать, дополнить, поправить заметку.
+"""Инструменты агента вики: прочитать, найти, создать, дополнить, поправить заметку, вставить картинку.
 
 Не регистрируются в общем реестре TOOLS — их видит только агент вики. Источник (сырой текст)
 к заметке привязывает код: модель его не пересказывает и не копирует.
@@ -46,6 +46,12 @@ def wiki_tools(wiki: Wiki, source: Callable[[], str]) -> dict[str, Tool]:
         return wiki.append(name, text, as_list(links), source())
 
     # ----------------------------------------
+    # Вставить присланную картинку (images/…) в конец заметки
+    # ----------------------------------------
+    def wiki_add_image(ws: Workspace, name: str, image: str, caption: str = "") -> str:
+        return wiki.add_image(name, image, caption, source())
+
+    # ----------------------------------------
     # Заменить фрагмент old на new
     # ----------------------------------------
     def wiki_edit(ws: Workspace, name: str, old: str, new: str) -> str:
@@ -60,6 +66,8 @@ def wiki_tools(wiki: Wiki, source: Callable[[], str]) -> dict[str, Tool]:
          "из каталога через запятую"),
         (wiki_append, "Дополнение заметки",
          "Дописывает text в конец заметки name, старое не трогает; links — ещё связи через запятую"),
+        (wiki_add_image, "Картинка в заметку",
+         "Вставляет картинку image (images/… из строки «[картинки: …]») в конец заметки name; caption — подпись"),
         (wiki_edit, "Правка заметки", "Заменяет в заметке name фрагмент old (ровно как в тексте) на new"),
     ]
     return {func.__name__: Tool(func.__name__, description, func, never, describe_signature(func), title)

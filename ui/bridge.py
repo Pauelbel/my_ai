@@ -28,7 +28,7 @@ from agent_core.config import ROOT, Config
 from agent_core.events import Event
 from ui.git_changes import changes, diff_rows
 from wiki.agent import WikiAgent
-from wiki.store import Wiki
+from wiki.store import IMAGES_DIR as WIKI_IMAGES, Wiki
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +47,8 @@ MAX_OPEN_BYTES = 2_000_000  # больше — редактор не откры�
 IMAGES_DIR = ROOT / "logs" / "images"  # картинки из чата: журнал сессии ссылается на них путями
 IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
 MAX_IMAGE_BYTES = 10_000_000
+FILE_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+                    ".gif": "image/gif", ".svg": "image/svg+xml", ".bmp": "image/bmp", ".ico": "image/x-icon"}
 
 
 # ----------------------------------------
@@ -334,6 +336,7 @@ class ChatApi:
         self._wiki = Wiki((ROOT / Path(str(wiki.get("dir") or "wiki_data")).expanduser()).resolve())
         self._wiki_session = Session(config, self._wiki.root,
                                      WikiAgent(config, self._wiki, str(wiki.get("model") or "")))
+        self._wiki_mode = bool(state.get("wiki_open"))  # открыт раздел «Вики»: активная сессия — агент вики, тот же чат
         self._spaces: dict[str, Space] = {}
         self._active = ""
         self._emitter: Emitter | None = None
@@ -407,10 +410,10 @@ class ChatApi:
         self._session(session_id).agent.stop()
 
     # ----------------------------------------
-    # Строка статуса: agent.status() + GPU + состояния вкладок и пространств
+    # Строка статуса: agent.status() сессии (по умолчанию активной; в разделе «Вики» — агента вики) + GPU + вкладки
     # ----------------------------------------
-    def status(self) -> dict[str, Any]:
-        session = self._session()
+    def status(self, session_id: str = "") -> dict[str, Any]:
+        session = self._session(session_id)
         return {"status": asdict(session.agent.status()), "gpu": self._gpu.text(), "session": session.id,
                 "busy": session.busy, "spaces": self.spaces(), "sessions": self._sessions_info()}
 
@@ -519,6 +522,19 @@ class ChatApi:
                 "mtime": str(full.stat().st_mtime_ns)}  # строкой: наносекунды не влезают в число JS
 
     # ----------------------------------------
+    # Картинка из папки пространства — data URL (вкладка-просмотр, картинки в Markdown); не картинка — пусто
+    # ----------------------------------------
+    def file_image(self, path: str, root: str = "") -> str:
+        try:
+            _root, full = self._space_path(path, root)
+            mime = FILE_IMAGE_TYPES.get(full.suffix.lower())
+            if not mime or not full.is_file() or full.stat().st_size > MAX_IMAGE_BYTES:
+                return ""
+            return f"data:{mime};base64,{base64.b64encode(full.read_bytes()).decode('ascii')}"
+        except (OSError, ValueError):
+            return ""
+
+    # ----------------------------------------
     # Сохранение из редактора (root — пространство вкладки); файл поменяли после открытия — conflict, пока не придёт force
     # ----------------------------------------
     def save_file(self, path: str, text: str, mtime: str = "", crlf: bool = False, force: bool = False,
@@ -577,7 +593,8 @@ class ChatApi:
     def image(self, path: str) -> str:
         full = Path(str(path)).resolve()
         mime = {ext: mime for mime, ext in IMAGE_TYPES.items()}.get(full.suffix.lstrip("."))
-        if not mime or not full.is_relative_to(IMAGES_DIR.resolve()) or not full.is_file():
+        folders = (IMAGES_DIR.resolve(), (self._wiki.root / WIKI_IMAGES).resolve())
+        if not mime or not any(full.is_relative_to(folder) for folder in folders) or not full.is_file():
             return ""
         return f"data:{mime};base64,{base64.b64encode(full.read_bytes()).decode('ascii')}"
 
@@ -680,6 +697,8 @@ class ChatApi:
     # Новая вкладка-сессия в активном пространстве
     # ----------------------------------------
     def new_session(self) -> dict[str, Any]:
+        if self._wiki_mode:
+            return {**self.wiki_clear(), **self.state()}
         space = self._spaces[self._active]
         session = Session(space.config, space.path)
         space.sessions.append(session)
@@ -819,12 +838,15 @@ class ChatApi:
         return {"ok": True, **self.connection()}
 
     # ----------------------------------------
-    # Смена модели для активной сессии командой /модель
+    # Смена модели для сессии (по умолчанию — активной) командой /модель; у агента вики служебных команд нет
     # ----------------------------------------
-    def set_model(self, name: str) -> dict[str, Any]:
-        session = self._session()
+    def set_model(self, name: str, session_id: str = "") -> dict[str, Any]:
+        session = self._session(session_id)
         if session.busy:
             return {"ok": False, "error": "агент работает — дождись ответа"}
+        if session is self._wiki_session:
+            session.agent.config.model = name
+            return {"ok": True, "model": name}
         for _event in session.agent.send(f"/модель {name}"):
             pass
         return {"ok": True, "model": session.agent.status().model}
@@ -858,6 +880,33 @@ class ChatApi:
         return {"session": self._wiki_session.id, "tree": self._wiki.tree(), "root": str(self._wiki.root),
                 "model": agent.config.model, "busy": self._wiki_session.busy,
                 "ui": {key: self._state.get(key) for key in UI_KEYS if key.startswith("wiki_")}}
+
+    # ----------------------------------------
+    # «Очистить» чат агента вики: новый разговор (заметки не трогаются)
+    # ----------------------------------------
+    def wiki_clear(self) -> dict[str, Any]:
+        if self._wiki_session.busy:
+            return {"ok": False, "error": "агент вики работает — esc, чтобы остановить"}
+        self._wiki_session.agent.clear()
+        self._wiki_session.id = secrets.token_hex(3)  # новый id — у окна новая пустая лента
+        return {"ok": True}
+
+    # ----------------------------------------
+    # Раздел «Вики» открыт или закрыт: пока открыт, чат работает с агентом вики (отправка, Esc, статус, модель)
+    # ----------------------------------------
+    def wiki_mode(self, on: bool) -> dict[str, Any]:
+        self._wiki_mode = bool(on)
+        return self.state()
+
+    # ----------------------------------------
+    # Картинка вики (images/…, путь от корня вики) — data URL для заметки; нет — пусто
+    # ----------------------------------------
+    def wiki_asset(self, path: str) -> str:
+        try:
+            data, mime = self._wiki.asset(str(path))
+        except (OSError, ValueError):
+            return ""
+        return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
     # ----------------------------------------
     # Заметка для просмотра и правки
@@ -960,6 +1009,8 @@ class ChatApi:
             for session in self._all_sessions():
                 if session.id == session_id:
                     return session
+        if self._wiki_mode:
+            return self._wiki_session
         space = self._spaces[self._active]
         return next((s for s in space.sessions if s.id == space.active), space.sessions[0])
 
@@ -973,6 +1024,9 @@ class ChatApi:
     # Вкладки активного пространства
     # ----------------------------------------
     def _sessions_info(self) -> list[dict[str, Any]]:
+        if self._wiki_mode:
+            wiki = self._wiki_session
+            return [{**wiki.info(), "title": "агент вики", "busy": wiki.busy, "active": True, "wiki": True}]
         space = self._spaces[self._active]
         return [{**s.info(), "busy": s.busy, "active": s.id == space.active} for s in space.sessions]
 

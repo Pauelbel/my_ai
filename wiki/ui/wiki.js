@@ -1,12 +1,12 @@
-// Раздел «Вики» окна чата: дерево заметок | чат агента вики | заметка (просмотр и правка) или граф.
-// Подключает ui/app.py после загрузки страницы чата (wiki/assets.py); берёт из chat.js $, el, api, ask,
-// renderMarkdown, ensureFeed.
+// Раздел «Вики» окна чата: дерево заметок | чат | заметка (просмотр и правка) или граф.
+// Чат — тот же блок #main, что у вкладок: в разделе его активная сессия — агент вики (ChatApi.wiki_mode), поэтому
+// картинки, диктовка, история, Esc и строка статуса работают одинаково. Подключает ui/app.py после загрузки
+// страницы (wiki/assets.py); берёт из chat.js $, el, api, ask, render, renderMarkdown, showImages, focusInput.
 
 "use strict";
 
 const wiki = {
   open: false,
-  session: "",            // сессия агента вики
   tree: [],               // [{folder, notes: [{name, title, summary, updated}]}]
   name: "",               // открытая заметка
   note: null,             // ответ wiki_note для неё
@@ -35,15 +35,6 @@ function buildWiki() {
       <div id="wiki-root" class="muted"></div>
     </aside>
     <div id="wiki-work">
-      <section id="wiki-chat" class="box">
-        <div class="box-title">агент вики <span id="wiki-model" class="muted"></span></div>
-        <div id="wiki-feed"></div>
-        <div id="wiki-composer">
-          <span class="prompt">❯</span>
-          <textarea id="wiki-input" rows="1" spellcheck="false"
-            placeholder="текст и что с ним сделать · enter — отправить, shift+enter — строка"></textarea>
-        </div>
-      </section>
       <main id="wiki-center" class="box">
         <div id="wiki-pane-resizer" class="wresizer" title="тянуть — ширина · двойной клик — пополам"></div>
         <div class="box-title tabs" id="wiki-tabs">
@@ -63,7 +54,7 @@ function buildWiki() {
         <div id="wiki-graph" hidden></div>
       </main>
     </div>`;
-  document.body.append(root);
+  $("#statusbar").before(root);  // в сетке окна над строкой статуса: она общая для чата и вики
   const open = el("button", "", "◈ вики");
   open.id = "wiki-open";
   open.title = "вики: заметки, граф, агент вики";
@@ -78,11 +69,6 @@ function buildWiki() {
   $("#wiki-delete").onclick = deleteWikiNote;
   $("#wiki-text").oninput = () => { wiki.dirty = true; flashWiki("не сохранено"); };
   $("#wiki-view").addEventListener("click", wikiViewClick);
-  const input = $("#wiki-input");
-  input.oninput = () => { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 220)}px`; };
-  input.onkeydown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendWiki(); }
-  };
   wikiResizer($("#wiki-side-resizer"), () => $("#wiki-side").getBoundingClientRect().width, 1,
               (px, save) => setWikiSideWidth(px, save), () => setWikiSideWidth(WIKI_SIDE_WIDTH));
   wikiResizer($("#wiki-pane-resizer"), () => $("#wiki-center").getBoundingClientRect().width, -1,
@@ -141,41 +127,37 @@ function setWikiPaneWidth(px, save = true) {
 // ----------------------------------------
 // Открыть или закрыть раздел; состояние переживает перезапуск
 // ----------------------------------------
-function showWiki(on, save = true) {
+async function showWiki(on, save = true) {
   wiki.open = on;
   $("#wiki").hidden = !on;
+  $("#app").classList.toggle("wiki-open", on);
+  if (on) $("#wiki-work").prepend($("#main"));  // тот же чат переезжает в раздел и обратно
+  else $("#work").prepend($("#main"));
+  $("#input").placeholder = on ? WIKI_PLACEHOLDER : CHAT_PLACEHOLDER;
   if (save) api().save_ui({ wiki_open: on });
-  if (on) { refreshWiki(); $("#wiki-input").focus(); }
-  else if (window.focusInput) window.focusInput();
+  render(await api().wiki_mode(on));
+  pollStatus();
+  if (on) refreshWiki();
+  focusInput();
 }
+
+const CHAT_PLACEHOLDER = $("#input").placeholder;
+const WIKI_PLACEHOLDER = "текст и что с ним сделать · ↑ — прошлые";
 
 // ----------------------------------------
 // Свежие данные: дерево, лента агента, открытая заметка или граф
 // ----------------------------------------
 async function refreshWiki() {
   const r = await api().wiki_state();
-  wiki.session = r.session;
   wiki.tree = r.tree;
-  $("#wiki-model").textContent = `· ${r.model}`;
   $("#wiki-root").textContent = r.root;
   $("#wiki-root").title = "папка вики — [wiki] dir в config.toml";
-  placeWikiFeed();
   renderWikiTree();
   renderWikiTabs();
+  linkWikiRefs(feeds.get(app.session)?.el);  // дерево свежее — ссылки и на только что созданные заметки
   if (wiki.tab === "graph") await loadWikiGraph();
   if (wiki.name && !wiki.dirty && !wiki.sourceView) await openWikiNote(wiki.name, { keepEdit: true });
   if (!wiki.name) renderWikiEmpty();
-}
-
-// ----------------------------------------
-// Лента агента вики — та же, что у вкладок чата, но в колонке вики
-// ----------------------------------------
-function placeWikiFeed() {
-  if (!wiki.session) return;
-  const feed = ensureFeed(wiki.session);
-  if (feed.el.parentElement !== $("#wiki-feed")) $("#wiki-feed").append(feed.el);
-  feed.el.hidden = false;
-  feed.scroll();
 }
 
 // ======== дерево ========
@@ -314,6 +296,7 @@ function renderWikiNote() {
   }
   const body = el("div", "wbody");
   renderMarkdown(body, wikiLinks(n.body, n.titles));
+  showImages(body, n.path.split("/").slice(0, -1).join("/"), (path) => api().wiki_asset(path));  // ../../images/… от заметки
   view.append(body);
 }
 
@@ -490,20 +473,52 @@ function renderWikiLegend(folders) {
   if (!folders.length) legend.append(el("span", "muted", "заметок пока нет"));
 }
 
-// ======== агент вики ========
+// ======== события и клавиши ========
 
 // ----------------------------------------
-// Сообщение агенту вики
+// [[имя]] в ленте агента вики → название заметки, как в дереве, ссылкой; в коде не трогается.
+// Заметки ещё нет в дереве (только что создана) — текст остаётся, после обновления дерева станет ссылкой
 // ----------------------------------------
-async function sendWiki() {
-  const input = $("#wiki-input");
-  const text = input.value.trim();
-  if (!text || !wiki.session) return;
-  const r = await api().send(text, wiki.session);
-  if (!r.ok) { flashWiki(r.error || "не отправлено"); return; }
-  input.value = "";
-  input.style.height = "auto";
+const WIKI_REF = /\[\[([^\[\]|#]+?)(?:\|([^\]]*))?\]\]/g;
+function linkWikiRefs(root) {
+  if (!root) return;
+  const titles = new Map(wiki.tree.flatMap((group) => group.notes.map((n) => [n.name, n.title])));
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (node.nodeValue.includes("[[") && !node.parentElement.closest("code, pre, a, .user-line")) nodes.push(node);
+  }
+  for (const node of nodes) {
+    const text = node.nodeValue;
+    const parts = document.createDocumentFragment();
+    let last = 0;
+    for (const match of text.matchAll(WIKI_REF)) {
+      const name = match[1].trim();
+      if (!titles.has(name)) continue;
+      parts.append(text.slice(last, match.index));
+      const link = el("a", "wiki-ref", match[2] || titles.get(name));
+      link.href = "#";
+      link.dataset.note = name;
+      link.title = `${name}.md — открыть`;
+      parts.append(link);
+      last = match.index + match[0].length;
+    }
+    if (!last) continue;
+    parts.append(text.slice(last));
+    node.replaceWith(parts);
+  }
 }
+
+// ----------------------------------------
+// Щелчок по ссылке на заметку в ленте — открыть её во вкладке «заметка»
+// ----------------------------------------
+$("#feeds").addEventListener("click", (e) => {
+  const link = e.target.closest("a.wiki-ref");
+  if (!link) return;
+  e.preventDefault();
+  openWikiNote(link.dataset.note);
+});
 
 // ----------------------------------------
 // События ядра: агент вики закончил — дерево, граф и заметка обновляются
@@ -511,7 +526,9 @@ async function sendWiki() {
 const chatOnEvent = window.onEvent;
 window.onEvent = function (ev) {
   chatOnEvent(ev);
-  if (ev.session === wiki.session && ev.type === "done" && wiki.open) refreshWiki();
+  const mine = app.sessions.some((s) => s.wiki && s.id === ev.session);
+  if (mine && ev.type === "answer") linkWikiRefs(feeds.get(ev.session)?.el);
+  if (wiki.open && ev.type === "done" && mine) refreshWiki();
 };
 
 // ----------------------------------------
@@ -524,11 +541,11 @@ window.addEventListener("keydown", (e) => {
     e.stopPropagation();
     const filter = $("#wiki-filter");
     if (document.activeElement === filter && filter.value) { filter.value = ""; wiki.hits = []; renderWikiTree(); return; }
-    api().wiki_state().then((r) => { if (r.busy) api().stop(wiki.session); else showWiki(false); });
+    api().wiki_state().then((r) => { if (r.busy) api().stop(); else showWiki(false); });  // активная сессия — агент вики
     return;
   }
   if (e.ctrlKey && !e.altKey && e.code === "KeyS") { e.preventDefault(); e.stopPropagation(); saveWikiNote(); return; }
-  if (e.ctrlKey && !e.altKey && ["KeyN", "KeyK", "KeyO", "KeyB"].includes(e.code)) e.stopPropagation();  // это клавиши чата
+  if (e.ctrlKey && !e.altKey && ["KeyK", "KeyB"].includes(e.code)) e.stopPropagation();  // пространства и колонка чата
 }, true);
 
 buildWiki();

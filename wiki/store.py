@@ -3,6 +3,7 @@
     <папка вики>/
       notes/<раздел>/<имя>.md   заметки: frontmatter + Markdown, ссылки [[имя]]
       raw/<дата>_<время>.md      сырые тексты как есть — их никто не правит
+      images/                    картинки: присланные в чат вики и вставленные в заметки
       index.md                   каталог: раздел → заметки с описанием (пишется после каждой правки)
       log.md                     журнал: что и когда создано, дополнено, поправлено
       .history/                  прежние версии заметок перед каждой правкой
@@ -13,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import threading
@@ -23,6 +25,7 @@ from typing import Any
 
 NOTES_DIR = "notes"
 RAW_DIR = "raw"
+IMAGES_DIR = "images"
 HISTORY_DIR = ".history"
 TRASH_DIR = ".trash"
 INDEX_FILE = "index.md"
@@ -32,6 +35,10 @@ NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")  # имя файла заметк
 LINK = re.compile(r"\[\[([^\[\]|#]+?)(?:\|[^\]]*)?\]\]")
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n?", re.S)
 SEARCH_LIMIT = 20
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+               ".gif": "image/gif", ".svg": "image/svg+xml"}
+IMAGE_LINK = re.compile(r"(!\[[^\]]*\]\()(?:\./)?(images/)")  # ![подпись](images/…) — путь от корня вики
+IMAGE_SRC = re.compile(r"!\[[^\]]*\]\(<?([^)\s>]+)")  # куда ссылается каждая картинка в тексте
 
 
 # ----------------------------------------
@@ -185,6 +192,45 @@ class Wiki:
             return relative
 
     # ----------------------------------------
+    # Картинка из чата → images/<имя>; возвращает путь от корня вики (images/…)
+    # ----------------------------------------
+    def save_image(self, source: Path) -> str:
+        with self._lock:
+            folder = self.root / IMAGES_DIR
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / source.name
+            number = 1
+            while target.exists():
+                number += 1
+                target = folder / f"{source.stem}-{number}{source.suffix}"
+            shutil.copyfile(source, target)
+            relative = target.relative_to(self.root).as_posix()
+            self._log("картинка", relative)
+            return relative
+
+    # ----------------------------------------
+    # Картинка вики для просмотра: (байты, mime); только картинки внутри папки вики
+    # ----------------------------------------
+    def asset(self, relative: str) -> tuple[bytes, str]:
+        path = (self.root / relative).resolve()
+        if not path.is_file() and f"/{IMAGES_DIR}/" in f"/{relative}":  # ссылку записали от корня, а не от заметки
+            path = (self.root / IMAGES_DIR / Path(relative).name).resolve()
+        mime = IMAGE_TYPES.get(path.suffix.lower())
+        if not mime or not path.is_relative_to(self.root.resolve()) or not path.is_file():
+            raise ValueError(f"картинки {relative} нет")
+        return path.read_bytes(), mime
+
+    # ----------------------------------------
+    # Вставить картинку images/… в конец заметки (перед «См. также»)
+    # ----------------------------------------
+    def add_image(self, name: str, image: str, caption: str = "", source: str = "") -> str:
+        image = image.strip().lstrip("./")
+        if not image.startswith(f"{IMAGES_DIR}/") or not (self.root / image).is_file():
+            raise ValueError(f"картинки {image} нет — имена картинок в строке «[картинки: …]» сообщения пользователя")
+        self.append(name, f"![{one_line(caption)}]({image})", source=source)
+        return f"картинка {image} вставлена в заметку {name}"
+
+    # ----------------------------------------
     # Новая заметка: frontmatter и «См. также» добавляет код; имя занято — ошибка с подсказкой
     # ----------------------------------------
     def create(self, folder: str, name: str, title: str, summary: str, text: str,
@@ -201,7 +247,9 @@ class Wiki:
             today = f"{datetime.now():%Y-%m-%d}"
             meta = {"title": title, "summary": summary, "sources": source, "created": today, "updated": today}
             known, unknown = split_links(links or [], notes, name)
-            body = with_see_also(re.sub(r"\A#\s[^\n]*\n+", "", text.strip()), known)  # «# Заголовок» — уже в title
+            text = self._image_paths(re.sub(r"\A#\s[^\n]*\n+", "", text.strip()), folder)  # «# Заголовок» — уже в title
+            self._check_images(text, folder)
+            body = with_see_also(text, known)
             path = self.notes_dir / folder / f"{name}.md"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(render(meta, body), encoding="utf-8", newline="\n")
@@ -219,7 +267,9 @@ class Wiki:
             meta, body = split(path.read_text(encoding="utf-8"))
             main, linked = cut_see_also(body)
             known, unknown = split_links(links or [], notes, name)
-            body = with_see_also(f"{main.rstrip()}\n\n{text.strip()}".strip(), [*linked, *known])
+            text = self._image_paths(text.strip(), note.folder)
+            self._check_images(text, note.folder)
+            body = with_see_also(f"{main.rstrip()}\n\n{text}".strip(), [*linked, *known])
             meta["updated"] = f"{datetime.now():%Y-%m-%d}"
             if source:
                 meta["sources"] = ", ".join(dict.fromkeys([*note.sources, source]))
@@ -239,7 +289,9 @@ class Wiki:
             count = text.count(old) if old else 0
             if count != 1:
                 raise ValueError(f"в заметке {name} фрагмент old найден {count} раз — нужен ровно один, прочитай её через wiki_read")
-            meta, body = split(text.replace(old, new, 1))
+            result = self._image_paths(text.replace(old, new, 1), note.folder)
+            self._check_images(result, note.folder, ignore=self._missing_images(text, note.folder))  # прежние битые не мешают
+            meta, body = split(result)
             meta["updated"] = f"{datetime.now():%Y-%m-%d}"
             self._backup(path)
             path.write_text(render(meta, body), encoding="utf-8", newline="\n")
@@ -295,6 +347,31 @@ class Wiki:
         if name not in notes:
             raise ValueError(f"заметки {name} нет — смотри имена в каталоге")
         return notes[name]
+
+    # ----------------------------------------
+    # ![…](images/…) в тексте от модели — путь от файла заметки (../../images/…), как его понимают Markdown и Obsidian
+    # ----------------------------------------
+    def _image_paths(self, text: str, folder: str) -> str:
+        prefix = os.path.relpath(self.root, self.notes_dir / folder).replace(os.sep, "/")
+        return IMAGE_LINK.sub(lambda match: f"{match.group(1)}{prefix}/{match.group(2)}", text)
+
+    # ----------------------------------------
+    # Каждая картинка в тексте должна быть файлом вики; выдуманное имя — ошибка со списком настоящих
+    # ----------------------------------------
+    def _check_images(self, text: str, folder: str, ignore: list[str] | tuple[str, ...] = ()) -> None:
+        missing = [src for src in self._missing_images(text, folder) if src not in ignore]
+        if missing:
+            names = sorted(p.relative_to(self.root).as_posix() for p in (self.root / IMAGES_DIR).glob("*") if p.is_file())
+            raise ValueError(f"таких картинок нет: {', '.join(missing)}. Имена не придумывай — есть только: "
+                             f"{', '.join(names[-30:]) or 'картинок пока нет'} (пиши ![подпись](images/имя))")
+
+    # ----------------------------------------
+    # Ссылки на картинки, которых нет на диске (внешние http/data не проверяются)
+    # ----------------------------------------
+    def _missing_images(self, text: str, folder: str) -> list[str]:
+        base = self.notes_dir / folder
+        return [src for src in IMAGE_SRC.findall(text)
+                if not re.match(r"^[a-z][a-z0-9+.-]*:", src) and not (base / src).resolve().is_file()]
 
     # ----------------------------------------
     # Путь к файлу заметки

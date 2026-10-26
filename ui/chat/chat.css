@@ -166,19 +166,26 @@ body.resizing { cursor: col-resize; user-select: none; }
   min-width: 0;
 }
 
-.tabs { left: 8px; right: 8px; gap: 0; overflow: hidden; background: none; padding: 0; }
+.tabs { left: 8px; right: 8px; gap: 4px; overflow: hidden; background: none; padding: 0; }
 
+/* вкладки на рамке: неактивные — чёткий текст, активная — подложка с рамкой цвета ссылки */
 .tab {
   background: var(--bg);
-  padding: 0 6px;
-  color: var(--muted);
+  padding: 0 8px;
+  color: color-mix(in srgb, var(--text) 72%, var(--bg));
+  border: 1px solid transparent;
+  border-radius: 4px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
-.tab + .tab { border-left: 1px solid var(--border); }
-.tab.active { color: var(--text); font-weight: 700; }
+.tab.active {
+  color: var(--accent);
+  font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--bg));
+}
 .tab .close { color: var(--muted); visibility: hidden; font-weight: 400; }
 .tab:hover .close { visibility: visible; }
 .tab .close:hover { color: var(--error); }
@@ -246,6 +253,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 .step-output.error { color: var(--error); }
 .thinking { color: var(--muted); font-style: italic; white-space: pre-wrap; word-break: break-word; opacity: 0.85; }
+.thinking-head { color: var(--muted); font-style: italic; padding: 0; opacity: 0.85; }
+.thinking-head:hover { color: var(--accent); opacity: 1; }
+.thinking-box.collapsed .thinking { display: none; }
 
 .spinner::before {
   content: "⠋";
@@ -389,6 +399,15 @@ body.resizing { cursor: col-resize; user-select: none; }
 #statusbar > span + span::before { content: " · "; color: var(--border); }
 #statusbar .clickable { cursor: pointer; color: var(--text); }
 #statusbar .clickable:hover { color: var(--accent); }
+#statusbar .meter {
+  display: inline-block; width: 64px; height: 6px; margin: 0 5px; vertical-align: middle;
+  border: 1px solid var(--border); border-radius: 3px; overflow: hidden;
+}
+#statusbar .meter b { display: block; height: 100%; background: var(--accent); }
+#statusbar .ctx.high { color: var(--working); }
+#statusbar .ctx.high .meter b { background: var(--working); }
+#statusbar .ctx.full { color: var(--error); }
+#statusbar .ctx.full .meter b { background: var(--error); }
 
 /* слои поверх ленты */
 
@@ -421,9 +440,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 /* окно настроек: вкладки сверху, под ними содержимое вкладки */
 .settings-dialog { width: min(1040px, 94vw); height: min(720px, 88vh); max-height: none; }
 #settings-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin: 0 0 12px; flex: none; }
-.stab { color: var(--muted); padding: 4px 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-.stab:hover { color: var(--text); }
-.stab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.stab { color: color-mix(in srgb, var(--text) 72%, var(--bg)); padding: 4px 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; border-radius: 4px 4px 0 0; }
+.stab:hover { color: var(--accent); }
+.stab.active { color: var(--accent); font-weight: 700; border-bottom-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
 .stab .count { color: var(--muted); font-size: 0.85em; }
 #settings-body { flex: 1; min-height: 0; overflow: auto; }
 
@@ -681,7 +700,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 #attach svg { width: 18px; height: 18px; }
 #attachments { display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 12px 0; border-top: 1px solid var(--border); }
 #attachments[hidden] { display: none; }
-#attachments + #composer { border-top: 0; }
+#attachments:not([hidden]) + #composer { border-top: 0; }  /* линию над полем рисуют картинки, только когда они есть */
 .thumb { position: relative; }
 .thumb img { height: 64px; max-width: 160px; object-fit: cover; display: block; border: 1px solid var(--border); cursor: zoom-in; }
 .thumb-remove {
@@ -691,5 +710,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 .thumb-remove:hover { color: var(--error); border-color: var(--error); }
 .user-images { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 6px; }
 .user-images img { max-height: 180px; max-width: 320px; border: 1px solid var(--border); cursor: zoom-in; display: block; }
+.md-image { max-width: 100%; cursor: zoom-in; border-radius: 4px; }
+#editor-main.image #editor-preview { display: flex; align-items: center; justify-content: center; background: var(--bg-raised); }
+.editor-image { max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in;
+  background: repeating-conic-gradient(var(--bg-hover) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
 #lightbox { z-index: 50; cursor: zoom-out; }
 #lightbox img { max-width: 94vw; max-height: 92vh; box-shadow: 0 6px 30px rgba(0, 0, 0, .35); }

@@ -6,14 +6,18 @@
 
 from __future__ import annotations
 
+import secrets
+import time
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Generator
 
 from agent_core.agent import Agent
 from agent_core.config import Config
 from agent_core.events import Event
 from agent_core.journal import Journal
+from agent_core.prompts import SERVICE_HELP
 from agent_core.schemas import NeedSkill
 from wiki.store import Wiki
 from wiki.tools import wiki_tools
@@ -21,7 +25,8 @@ from wiki.tools import wiki_tools
 CHAT_DIR = ".chat"  # журналы чата вики — внутри папки вики, а не в logs/ (там /продолжить основного чата)
 CONTEXT_TURNS = 3  # модель видит столько последних сообщений пользователя с ответами
 RAW_MIN_CHARS = 200  # сообщение длиннее — сырой текст, сохраняется в raw/
-NO_SKILLS = "В вики я умею только читать, искать, создавать, дополнять и править заметки."
+NO_SKILLS = "В вики я умею только читать, искать, создавать, дополнять и править заметки и вставлять картинки."
+COMMANDS = "В чате вики: /модель <имя> — сменить модель, /новый — новый разговор, /стоп — прервать, /помощь — это."
 
 WIKI_PROMPT = """Ты ведёшь личную вики пользователя — заметки в Markdown. Отвечай по-русски, коротко.
 Каждый ответ — ровно одно действие в JSON:
@@ -36,6 +41,8 @@ WIKI_PROMPT = """Ты ведёшь личную вики пользовател�
   Раздел не назван — предложи подходящий из каталога (или новый) и спроси.
 - links — имена заметок из каталога, которые правда по теме. Обратные ссылки вики ставит сама.
 - Сырой текст уже сохранён как источник, к заметке он привяжется сам — не копируй его в ответ.
+- Картинки пользователя — в строке «[картинки: images/…]»: ты их видишь. В заметку — wiki_add_image
+  или ![подпись](images/имя) прямо в text. Описывай только то, что правда на картинке.
 - Вопрос по вики — wiki_search и wiki_read, ответ со ссылками [[имя]]. Чего в вики нет — так и скажи.
 - «Проверь вики» — по каталогу найди дубли, заметки не в своём разделе и заметки без связей;
   предложи, что поправить, сам ничего не меняй.
@@ -64,7 +71,25 @@ class WikiAgent(Agent):
         self._skills = {}
         self.commands = []
         self.toolset = wiki_tools(wiki, lambda: self.source)
-        self.journal = Journal(wiki.root / CHAT_DIR / f"{datetime.now():%Y-%m-%d_%H%M%S}.jsonl")
+        self.journal = self._new_journal()
+
+    # ----------------------------------------
+    # «Очистить»: новый разговор — свежий журнал, без источника и разрешений; заметки и прежние журналы остаются
+    # ----------------------------------------
+    def clear(self) -> None:
+        self.journal = self._new_journal()
+        self.source = ""
+        self.approved.clear()
+        self.started = time.monotonic()
+        self.state, self.step = "idle", 0
+        self._context_used = self._prompt_tokens = self._completion_tokens = 0
+        self._speed = 0.0
+
+    # ----------------------------------------
+    # Журнал чата вики: <папка вики>/.chat/<дата>_<время><id>.jsonl (файл появится при первой записи)
+    # ----------------------------------------
+    def _new_journal(self) -> Journal:
+        return Journal(self.wiki.root / CHAT_DIR / f"{datetime.now():%Y-%m-%d_%H%M%S}{secrets.token_hex(2)}.jsonl")
 
     # ----------------------------------------
     # Новые настройки подключения; своя модель вики остаётся
@@ -75,18 +100,32 @@ class WikiAgent(Agent):
         super().configure(**changes)
 
     # ----------------------------------------
-    # Длинный текст — сначала в raw/, потом обычный луп
+    # Длинный текст — сначала в raw/; картинки — копией в images/ вики, их имена — строкой в сообщении; потом луп
     # ----------------------------------------
     def send(self, text: str, images: list[str] | None = None) -> Generator[Event, None, None]:
         if len(text.strip()) >= RAW_MIN_CHARS:
             self.source = self.wiki.save_raw(text)
             yield Event("info", f"Сырой текст сохранён: {self.source}")
+        if images:
+            copies = [self.wiki.save_image(Path(path)) for path in images]
+            text = f"{text}\n[картинки: {', '.join(copies)}]"
+            images = [str(self.wiki.root / copy) for copy in copies]
+            yield Event("info", f"Картинки сохранены в вики: {', '.join(copies)}")
         yield from super().send(text, images)
 
     # ----------------------------------------
-    # Без служебных и быстрых команд: любое сообщение — задача для модели
+    # Служебные команды — свои (поле ввода общее с чатом); быстрые команды скиллов не работают; остальное — модели
     # ----------------------------------------
     def _dispatch(self, text: str, images: list[str]) -> Generator[Event, None, None]:
+        command, _, arg = text.partition(" ")
+        if not images and command.startswith("/") and command in {"/модель", "/новый", "/помощь"} | set(SERVICE_HELP):
+            if command == "/модель" and arg.strip():
+                self.config.model = arg.strip()
+            elif command == "/новый":
+                self.clear()
+            yield Event("info", f"Модель: {self.config.model}" if command == "/модель"
+                        else "Новый разговор." if command == "/новый" else COMMANDS)
+            return
         self.journal.write({"type": "user", "text": text, **({"images": images} if images else {})})
         yield from self._loop(text, step=0)
 

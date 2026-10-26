@@ -22,6 +22,7 @@ from wiki.assets import page_script as wiki_page_script
 
 from .bridge import UI_DIR, ChatApi, UiState, WidgetApi, WidgetPort
 from .cursor import CursorTracker
+from .single import serve, show_running
 
 log = logging.getLogger("ui")
 
@@ -53,6 +54,7 @@ class App:
         self.state = UiState()
         self.show_chat = show_chat
         self.chat_visible = show_chat
+        self.chat_minimized = False  # чат свёрнут — по ярлыку его нужно развернуть, а не только показать
         self.chat_api = ChatApi(self.core, self._folders(), self.state, load_section("wiki"))
         self.voice: Any = None
         try:
@@ -110,6 +112,7 @@ class App:
         self.chat.events.closing += self._chat_closing
         self.chat.events.loaded += self._load_wiki  # раздел «Вики» — из wiki/ui/, сервер окна отдаёт только ui/
         self.chat.events.minimized += self._show_head  # чат свернули — голова снова на экране
+        self.chat.events.minimized += self._chat_minimized
         self.chat.events.restored += self._sync_head
         self.widget.events.closing += self._widget_closing
         if self.masked:
@@ -127,6 +130,8 @@ class App:
         if self.ui.get("follow_mouse", True):
             self.cursor = CursorTracker(self._cursor_moved)
             self.cursor.start()
+        if self.ui.get("shortcut", True):
+            threading.Thread(target=self._ensure_shortcut, name="shortcut", daemon=True).start()
         icon = UI_DIR / ("icon.ico" if sys.platform == "win32" else "icon.png")  # WinForms понимает только .ico
         webview.start(gui=gui, debug=debug, private_mode=True, icon=str(icon))  # иконка в заголовке и на панели задач
 
@@ -186,6 +191,33 @@ class App:
         self.chat.run_js("window.focusInput && window.focusInput()")
 
     # ----------------------------------------
+    # Второй запуск (ярлык при уже работающей Асе): показать чат, свёрнутый — развернуть
+    # ----------------------------------------
+    def activate(self) -> None:
+        if self.chat is None:
+            return
+        self.open_chat()
+        if self.chat_minimized:
+            self.chat.restore()
+
+    # ----------------------------------------
+    # Чат свернули / развернули — помним для activate()
+    # ----------------------------------------
+    def _chat_minimized(self) -> None:
+        self.chat_minimized = True
+
+    # ----------------------------------------
+    # Ярлык «Ася» на рабочем столе: нет или устарел (папку перенесли) — создать; ошибка — только в лог
+    # ----------------------------------------
+    def _ensure_shortcut(self) -> None:
+        from .shortcut import ensure
+
+        try:
+            ensure(self.state)
+        except Exception:
+            log.exception("Ярлык на рабочем столе не создан")
+
+    # ----------------------------------------
     # Страница чата загрузилась — подключить раздел «Вики» (стили и скрипты из wiki/ui/)
     # ----------------------------------------
     def _load_wiki(self) -> None:
@@ -204,6 +236,7 @@ class App:
     # Чат развернули из свёрнутого — голову снова прячем
     # ----------------------------------------
     def _sync_head(self) -> None:
+        self.chat_minimized = False
         if self.chat_visible:
             self.widget.hide()
 
@@ -431,19 +464,27 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Десктопный интерфейс агента")
     parser.add_argument("--chat", action="store_true", help="сразу открыть окно чата")
     parser.add_argument("--debug", action="store_true", help="инструменты разработчика в окнах")
-    parser.add_argument("--shortcut", action="store_true", help="создать ярлык «Агент» в меню и выйти")
+    parser.add_argument("--shortcut", action="store_true", help="создать ярлык «Ася» на рабочем столе и выйти")
     args = parser.parse_args()
     if args.shortcut:
         from .shortcut import install
 
         print(f"Ярлык: {install()}")
         return
+    if show_running():  # Ася уже работает — она покажет чат, второй копии не будет
+        return
     (ROOT / "logs").mkdir(exist_ok=True)
     handlers: list[logging.Handler] = [logging.FileHandler(ROOT / "logs" / "app.log", encoding="utf-8")]
     if sys.stderr is not None:  # под pythonw stderr нет
         handlers.append(logging.StreamHandler())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", handlers=handlers)
+    holder: list[App] = []
+    try:
+        serve(lambda: holder and holder[0].activate())  # раньше App(): пока грузятся голос и агенты, второй запуск не стартует
+    except OSError:
+        logging.getLogger("ui").exception("Один экземпляр: порт не открылся")
     app = App(args.chat)
+    holder.append(app)
     # Ctrl+C или kill — тоже штатный выход: иначе скрипт KWin и микрофон остаются занятыми
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: threading.Thread(target=app.quit, daemon=True).start())

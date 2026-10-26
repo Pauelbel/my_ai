@@ -2,7 +2,7 @@
 
     python main.py              — виджет, чат скрыт
     python main.py --chat       — сразу с окном чата
-    python main.py --shortcut   — ярлык «Агент» в меню приложений (Linux) или «Пуск» (Windows)
+    python main.py --shortcut   — ярлык «Ася» на рабочем столе (Linux и Windows); обычно Ася создаёт его сама
 
 На Windows без консоли: pythonw main.py (так запускает и ярлык).
 """
