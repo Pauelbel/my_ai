@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -17,21 +18,60 @@ def read_file(ws: Workspace, path: str, start: int = 1, end: int | None = None) 
     full = ws.path(path)
     if is_secret(full):
         raise PermissionError("файлы .env с секретами читать нельзя")
+    return read_page(full, start, end, ws.config.output_limit)
+
+
+# ----------------------------------------
+# Страница файла с подсказкой, откуда читать дальше; не длиннее limit
+# ----------------------------------------
+def read_page(full: Path, start: int, end: int | None, limit: int) -> str:
+    if start < 1:
+        raise ValueError("start должен быть не меньше 1")
+    if end is not None and end < start:
+        raise ValueError("end должен быть не меньше start")
     lines = full.read_text(encoding="utf-8", errors="replace").splitlines()
+    if not lines:
+        return "(пустой файл)"
+    if start > len(lines):
+        return f"(строка {start} за пределами файла; всего строк: {len(lines)})"
     page = 300
-    last = min(end or start + page - 1, len(lines))
+    last = min(end if end is not None else start + page - 1, len(lines))
+    # Страница не длиннее вывода инструмента: иначе обрезка срежет подсказку, откуда читать дальше
+    budget, size = limit - 200, 0
+    for index in range(start - 1, last):
+        size += len(lines[index]) + 1
+        if size > budget and index > start - 1:
+            last = index
+            break
     text = "\n".join(lines[start - 1:last])
     if last < len(lines):
         text += f"\n…[показаны строки {start}-{last} из {len(lines)}; дальше: start={last + 1}]"
-    return text or "(пустой файл)"
+    return text
 
 
 # ----------------------------------------
-# Запись файла целиком, старая версия — в .bak
+# Markdown: модель пишет перенос в ячейке таблицы буквальным «\n» — в таблице это <br>
 # ----------------------------------------
-@tool("Запись файла", "Создаёт или перезаписывает файл целиком; старая версия сохраняется в .bak", confirm=always)
-def write_file(ws: Workspace, path: str, content: str) -> str:
+def md_cells(path: Path, text: str) -> str:
+    if path.suffix.lower() not in {".md", ".markdown"}:
+        return text
+    return "\n".join(re.sub(r"\\n", "<br>", line) if line.lstrip().startswith("|") else line
+                     for line in text.split("\n"))
+
+
+# ----------------------------------------
+# Запись файла целиком (старая версия — в .bak) или дописывание в конец
+# ----------------------------------------
+@tool("Запись файла", "Создаёт или перезаписывает файл целиком (старая версия сохраняется в .bak); "
+      "append=true — дописывает content в конец файла", confirm=always)
+def write_file(ws: Workspace, path: str, content: str, append: bool = False) -> str:
     full = ws.path(path)
+    content = md_cells(full, content)
+    if append and full.exists():
+        glue = "" if full.read_bytes()[-1:] in (b"", b"\n") else "\n"  # дописанное начинается с новой строки
+        with full.open("a", encoding="utf-8") as file:
+            file.write(glue + content)
+        return f"дописано в {ws.rel(full)} ({len(content)} символов)"
     if full.exists():
         shutil.copy2(full, full.with_name(full.name + ".bak"))
     full.parent.mkdir(parents=True, exist_ok=True)
@@ -47,13 +87,20 @@ def write_file(ws: Workspace, path: str, content: str) -> str:
 def edit_file(ws: Workspace, path: str, old: str, new: str) -> str:
     full = ws.path(path)
     text = full.read_text(encoding="utf-8")
+    full.write_text(replace_once(text, old, md_cells(full, new)), encoding="utf-8")
+    return f"изменён {ws.rel(full)}"
+
+
+# ----------------------------------------
+# Заменяет кусок, который встречается в тексте ровно один раз
+# ----------------------------------------
+def replace_once(text: str, old: str, new: str) -> str:
     count = text.count(old)
     if count == 0:
         raise ValueError("кусок old не найден; прочитай файл и скопируй текст точно")
     if count > 1:
         raise ValueError(f"кусок old найден {count} раз; возьми кусок длиннее, чтобы он был уникальным")
-    full.write_text(text.replace(old, new), encoding="utf-8")
-    return f"изменён {ws.rel(full)}"
+    return text.replace(old, new)
 
 
 # ----------------------------------------
@@ -77,7 +124,8 @@ def walk_tree(folder: Path, depth: int, indent: str, lines: list[str]) -> None:
     for entry in entries:
         if entry.name in SKIP_DIRS:
             continue
-        if entry.is_dir():
+        # Не ходим по симлинку на каталог: он может вести за пределы workspace.
+        if entry.is_dir() and not entry.is_symlink():
             lines.append(f"{indent}{entry.name}/")
             walk_tree(entry, depth - 1, indent + "  ", lines)
         else:
@@ -96,6 +144,11 @@ def delete(ws: Workspace, path: str) -> str:
         raise FileNotFoundError(f"{path} не существует")
     trash = ws.path(".trash")
     trash.mkdir(exist_ok=True)
-    target = trash / f"{datetime.now():%Y%m%d_%H%M%S}_{full.name}"
+    stamp = f"{datetime.now():%Y%m%d_%H%M%S_%f}"
+    target = trash / f"{stamp}_{full.name}"
+    suffix = 1
+    while target.exists():
+        target = trash / f"{stamp}_{suffix}_{full.name}"
+        suffix += 1
     shutil.move(full, target)
     return f"{ws.rel(full)} перемещён в {ws.rel(target)}"

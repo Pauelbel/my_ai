@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +24,15 @@ log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent  # папка проекта: пути к моделям в config.toml — от неё
 MIN_AUDIO_S = 0.3
+
+
+@dataclass(frozen=True)
+class _Recording:
+    """Контекст одной записи, который не меняется при старте следующей."""
+
+    token: int
+    mode: str
+    callback: Callable[[str], None] | None
 
 
 # ----------------------------------------
@@ -49,15 +59,24 @@ class VoiceAssistant:
         self.on_state: Callable[..., None] | None = None  # состояние для виджета: state, level, text, wake
         self.last_text = ""
         self.wake = None
-        self._mode = "clipboard"
-        self._on_result: Callable[[str], None] | None = None
+        self._recording: _Recording | None = None
+        self._generation = 0
+        self._last_result_generation = 0
         self._speech = False
         self._quiet_since = 0.0
         self._started = 0.0
         self._stopping = False
         self._live: LiveTranscript | None = None
         self._lock = threading.Lock()
-        self._chat = self._cleanup_client()
+        self._chat = self._cleanup_client(base_url, model)
+
+    # ----------------------------------------
+    # Новое подключение ядра: клиент чистки хранит адрес и модель внутри, поэтому его тоже нужно пересоздать
+    # ----------------------------------------
+    def configure(self, base_url: str, model: str) -> None:
+        chat = self._cleanup_client(base_url, model)
+        with self._lock:
+            self.base_url, self.model, self._chat = base_url, model, chat
 
     # ----------------------------------------
     # Идёт ли запись
@@ -93,6 +112,8 @@ class VoiceAssistant:
     # ----------------------------------------
     def start(self, mode: str, on_result: Callable[[str], None] | None = None, greet: bool = False,
               live: Callable[[str], None] | None = None) -> None:
+        error: Exception | None = None
+        failed_live: LiveTranscript | None = None
         with self._lock:
             if self.recording:
                 return
@@ -100,35 +121,58 @@ class VoiceAssistant:
                 self.wake.pause()
             if greet and self.reply:
                 self._greet()
-            self._mode, self._on_result = mode, on_result
+            self._generation += 1
+            recording = _Recording(self._generation, mode, on_result)
+            self._recording = recording
             self._speech, self._quiet_since, self._started = False, 0.0, time.monotonic()
             self._stopping = False
             self._live = LiveTranscript(self._vosk_path(), live) if live else None  # черновик по ходу речи
             try:
                 self.recorder.start(self._on_level, self._live.feed if self._live else None)
-            except Exception as error:
-                log.exception("Микрофон не открылся")
-                self._finish("", f"Микрофон недоступен: {error}")
-                return
+            except Exception as caught:
+                error = caught
+                failed_live, self._live = self._live, None
+                self._recording = None
+        if error is not None:
+            if failed_live:
+                failed_live.stop()
+            if self.wake is not None:
+                self.wake.resume()
+            log.error("Микрофон не открылся", exc_info=(type(error), error, error.__traceback__))
+            self._finish("", f"Микрофон недоступен: {error}", recording=recording)
+            return
         self.cues.play("start")
-        self._show(state="recording", level=0.0, text="")
+        self._show_for(recording, state="recording", level=0.0, text="")
 
     # ----------------------------------------
     # Стоп записи: звук «stop», обработка в фоне
     # ----------------------------------------
     def stop(self) -> None:
+        error: Exception | None = None
         with self._lock:
             if not self.recording:
                 return
-            audio = self.recorder.stop()
+            recording = self._recording
+            try:
+                audio = self.recorder.stop()
+            except Exception as caught:
+                error = caught
+                audio = None
             live, self._live = self._live, None
+            self._recording = None
         if live:
             live.stop()
         self.cues.play("stop")  # микрофон уже закрыт — звук в запись не попадёт
         if self.wake is not None:
             self.wake.resume()
-        self._show(state="processing", level=0.0)
-        threading.Thread(target=self._process, args=(audio,), name="voice", daemon=True).start()
+        if recording is None:
+            return
+        if error is not None:
+            log.error("Микрофон не остановился", exc_info=(type(error), error, error.__traceback__))
+            self._finish("", f"Ошибка микрофона: {error}", recording=recording)
+            return
+        self._show_for(recording, state="processing", level=0.0)
+        threading.Thread(target=self._process, args=(audio, recording), name="voice", daemon=True).start()
 
     # ----------------------------------------
     # Включает или выключает фоновое прослушивание имени агента
@@ -194,75 +238,96 @@ class VoiceAssistant:
     # ----------------------------------------
     # Конвейер после записи: Whisper → чистка (без Ollama — сырой текст) → буфер или поле ввода
     # ----------------------------------------
-    def _process(self, audio) -> None:
+    def _process(self, audio, recording: _Recording) -> None:
         if duration_s(audio) < MIN_AUDIO_S:
-            self._finish("", "Слишком коротко — ничего не записал")
+            self._finish("", "Слишком коротко — ничего не записал", recording=recording)
             return
         try:
             raw = self.transcriber.transcribe(audio)
         except Exception as error:
             log.exception("Ошибка распознавания")
-            self._finish("", f"Ошибка распознавания: {error}")
+            self._finish("", f"Ошибка распознавания: {error}", recording=recording)
             return
         if not raw:
-            self._finish("", "Речь не распознана")
+            self._finish("", "Речь не распознана", recording=recording)
             return
         note = ""
         text = raw
         # Диктовка в чат — ваши слова как есть: агент их и так поймёт, а чистка моделью может подменить их ответом
-        dictating = self._mode == "dictate"
+        dictating = recording.mode == "dictate"
         if self.settings.get("cleanup", True) and not (dictating and not self.settings.get("dictate_cleanup", False)):
             try:
-                text = clean_text(raw, self._chat)
+                with self._lock:
+                    chat = self._chat
+                text = clean_text(raw, chat)
             except Exception as error:
                 log.warning("Чистка не удалась, оставляю сырой текст: %s", error)
                 note = "Ollama недоступна — текст без чистки"
         log.info("Whisper: %s | чистый: %s", raw, text)
-        self.last_text = text
-        if self._mode == "dictate":
-            self._finish(text, "", "в поле")
+        with self._lock:
+            if recording.token >= self._last_result_generation:
+                self.last_text = text
+                self._last_result_generation = recording.token
+        if recording.mode == "dictate":
+            self._finish(text, "", "в поле", recording=recording)
             return
         try:
             clipboard.copy(text)
         except Exception as error:
-            self._finish("", str(error))
+            self._finish("", str(error), recording=recording)
             return
-        self._finish(text, "", "скопировано", note)
+        self._finish(text, "", "скопировано", note, recording)
 
     # ----------------------------------------
     # Итог: «готово» или «ошибка» в виджет, текст — ждущему dictate()
     # ----------------------------------------
-    def _finish(self, text: str, error: str, label: str = "", note: str = "") -> None:
+    def _finish(self, text: str, error: str, label: str = "", note: str = "",
+                recording: _Recording | None = None) -> None:
         if error:
-            self._show(state="error", text=error, level=0.0)
+            self._show_for(recording, state="error", text=error, level=0.0)
         else:
-            self._show(state="done", text=label, note=note, level=0.0)
-        callback, self._on_result = self._on_result, None
-        if callback:
-            callback(text)
+            self._show_for(recording, state="done", text=label, note=note, level=0.0)
+        if recording and recording.callback:
+            try:
+                recording.callback(text)
+            except Exception:
+                log.exception("Ошибка обработчика результата диктовки")
+
+    # ----------------------------------------
+    # Старый фоновый результат не должен затирать состояние уже начавшейся записи
+    # ----------------------------------------
+    def _show_for(self, recording: _Recording | None, **values: Any) -> None:
+        with self._lock:
+            current = recording is None or recording.token == self._generation
+        if current:
+            self._show(**values)
 
     # ----------------------------------------
     # Состояние подписчику (виджету), если он есть
     # ----------------------------------------
     def _show(self, **values: Any) -> None:
         if self.on_state is not None:
-            self.on_state(**values)
+            try:
+                self.on_state(**values)
+            except Exception:
+                log.debug("Ошибка подписчика состояния голоса", exc_info=True)
 
     # ----------------------------------------
     # Клиент Ollama для чистки: OpenAI-совместимый адрес ядра, без размышлений модели
     # ----------------------------------------
-    def _cleanup_client(self) -> Callable[[list[dict[str, str]], int], str]:
+    def _cleanup_client(self, base_url: str, model: str) -> Callable[[list[dict[str, str]], int], str]:
         from openai import OpenAI
 
-        client = OpenAI(base_url=self.base_url, api_key="ollama",
+        client = OpenAI(base_url=base_url, api_key="ollama",
                         timeout=float(self.settings.get("cleanup_timeout", 30)), max_retries=0)
-        model = self.settings.get("cleanup_model") or self.model
+        cleanup_model = self.settings.get("cleanup_model") or model
 
         # ----------------------------------------
         # Один ответ модели без стриминга
         # ----------------------------------------
         def chat(messages: list[dict[str, str]], max_tokens: int) -> str:
-            reply = client.chat.completions.create(model=model, messages=messages, temperature=0, max_tokens=max_tokens,
+            reply = client.chat.completions.create(model=cleanup_model, messages=messages, temperature=0,
+                                                   max_tokens=max_tokens,
                                                    extra_body={"reasoning_effort": "none"})
             return reply.choices[0].message.content or ""
 

@@ -46,19 +46,28 @@ class LiveTranscript:
         self._done: list[str] = []
         self._sent = ""
         self._last = 0.0
-        threading.Thread(target=self._run, name="live-transcript", daemon=True).start()
+        self._accepting = True
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, name="live-transcript", daemon=True)
+        self._thread.start()
 
     # ----------------------------------------
     # Кусок звука с микрофона (float32, частота микрофона)
     # ----------------------------------------
     def feed(self, block: np.ndarray, rate: int) -> None:
-        self._blocks.put((block, rate))
+        with self._lock:
+            if self._accepting:
+                self._blocks.put((block, rate))
 
     # ----------------------------------------
     # Запись кончилась: поток дочитывает очередь и завершается
     # ----------------------------------------
     def stop(self) -> None:
-        self._blocks.put(None)
+        with self._lock:
+            if not self._accepting:
+                return
+            self._accepting = False
+            self._blocks.put(None)
 
     # ----------------------------------------
     # Поток: Vosk без грамматики, каждая законченная фраза копится, текущая — частичным результатом
@@ -68,22 +77,25 @@ class LiveTranscript:
             import vosk
 
             recognizer = vosk.KaldiRecognizer(vosk_model(str(self.model_path)), SAMPLE_RATE)
+            while True:
+                item = self._blocks.get()
+                if item is None:
+                    return
+                block, rate = item
+                pcm = (np.clip(resample(block, rate, SAMPLE_RATE), -1, 1) * 32767).astype(np.int16).tobytes()
+                if recognizer.AcceptWaveform(pcm):
+                    phrase = json.loads(recognizer.Result()).get("text", "")
+                    if phrase:
+                        self._done.append(phrase)
+                    self._emit("", force=True)
+                else:
+                    self._emit(json.loads(recognizer.PartialResult()).get("partial", ""))
         except Exception as error:
             log.warning("Живой черновик диктовки недоступен: %s", error)
-            return
-        while True:
-            item = self._blocks.get()
-            if item is None:
-                return
-            block, rate = item
-            pcm = (np.clip(resample(block, rate, SAMPLE_RATE), -1, 1) * 32767).astype(np.int16).tobytes()
-            if recognizer.AcceptWaveform(pcm):
-                phrase = json.loads(recognizer.Result()).get("text", "")
-                if phrase:
-                    self._done.append(phrase)
-                self._emit("", force=True)
-            else:
-                self._emit(json.loads(recognizer.PartialResult()).get("partial", ""))
+        finally:
+            # Если модель или распознаватель упали, callback микрофона больше не копит бесполезную очередь.
+            with self._lock:
+                self._accepting = False
 
     # ----------------------------------------
     # Текст подписчику, если он изменился и прошло UPDATE_S

@@ -7,12 +7,13 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import Config, SKILLS_DIR
-from .tools.base import venv_env
+from .tools.base import run_process, venv_env
 
 if TYPE_CHECKING:
     from .schemas import SkillCode
@@ -91,31 +92,33 @@ def read_env(path: Path) -> dict[str, str]:
 # ----------------------------------------
 # Запуск скилла тем же Python из venv в отдельном процессе
 # ----------------------------------------
-def run_skill(skill: SkillInfo, args: dict[str, Any], config: Config) -> str:
+def run_skill(skill: SkillInfo, args: dict[str, Any], config: Config, stop: threading.Event | None = None) -> str:
     env = {**venv_env(), **read_env(skill.folder / ".env"),
            "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
            "AGENT_PROJECT": str(config.project_dir), "AGENT_START_URL": config.start_url}
-    done = subprocess.run([sys.executable, "-c", SKILL_RUNNER, str(skill.folder / "run.py")],
-                          input=json.dumps(args, ensure_ascii=False), cwd=config.project_dir, env=env,
-                          capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          timeout=config.skill_timeout)
+    done = run_process([sys.executable, "-c", SKILL_RUNNER, str(skill.folder / "run.py")],
+                       input=json.dumps(args, ensure_ascii=False), cwd=config.project_dir, env=env,
+                       timeout=config.skill_timeout, stop=stop)
     if done.returncode != 0:
         stderr = done.stderr.strip()
         reason = stderr.splitlines()[-1] if stderr else f"код {done.returncode}"
-        raise RuntimeError(f"скилл {skill.name} упал: {reason}\n{stderr[-2000:]}")
+        raise RuntimeError(f"скилл {skill.name} упал: {reason}\n{stderr[-2000:]}\n"
+                           f"Если ошибка в коде скилла, а не в окружении или аргументах — сразу почини его сам, не спрашивая и не создавая новый: "
+                           f'{{"name": "read_skill", "args": {{"name": "{skill.name}"}}}}, затем edit_skill.')
     return (done.stdout.strip() + ("\n" + done.stderr.strip() if done.stderr.strip() else "")) or "(нет вывода)"
 
 
 # ----------------------------------------
-# Сохраняет код скилла; прежний run.py уходит в run.py.bak
+# Сохраняет код скилла; прежняя версия изменившегося файла уходит в .bak
 # ----------------------------------------
 def save_skill(name: str, code: SkillCode) -> Path:
     folder = SKILLS_DIR / name
     folder.mkdir(parents=True, exist_ok=True)
-    if (folder / "run.py").exists():
-        shutil.copy2(folder / "run.py", folder / "run.py.bak")
-    (folder / "SKILL.md").write_text(code.skill_md.strip() + "\n", encoding="utf-8")
-    (folder / "run.py").write_text(code.run_py.rstrip() + "\n", encoding="utf-8")
+    for file, text in (("SKILL.md", code.skill_md.strip()), ("run.py", code.run_py.rstrip())):
+        path = folder / file
+        if path.exists() and path.read_text(encoding="utf-8") != text + "\n":
+            shutil.copy2(path, folder / f"{file}.bak")
+        path.write_text(text + "\n", encoding="utf-8")
     return folder
 
 

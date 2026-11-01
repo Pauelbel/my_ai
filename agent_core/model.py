@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import urllib.request
-from typing import Any, Callable, TypeVar
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, TypeVar
 
 import instructor
 from openai import OpenAI
@@ -57,6 +59,52 @@ class Model:
         self.usage: CompletionUsage | None = None  # токены последнего потокового вызова
         self.seconds = 0.0  # время генерации последнего потокового вызова
         self._windows: dict[str, int] = {}
+        self._lifecycle_lock = threading.Lock()
+        self._active_requests = 0
+        self._closing = False
+        self._client_closed = False
+
+    # ----------------------------------------
+    # Не закрывает HTTP-клиент под активным запросом; последний запрос закроет его сам
+    # ----------------------------------------
+    @contextmanager
+    def _request(self) -> Iterator[None]:
+        with self._lifecycle_lock:
+            if self._closing:
+                raise RuntimeError("клиент модели уже закрыт")
+            self._active_requests += 1
+        try:
+            yield
+        finally:
+            close_client = False
+            with self._lifecycle_lock:
+                self._active_requests -= 1
+                if self._closing and not self._active_requests and not self._client_closed:
+                    self._client_closed = True
+                    close_client = True
+            if close_client:
+                self._close_client()
+
+    # ----------------------------------------
+    # Освобождает пул HTTP-соединений; повторный close безопасен
+    # ----------------------------------------
+    def close(self) -> None:
+        close_client = False
+        with self._lifecycle_lock:
+            if self._closing:
+                return
+            self._closing = True
+            if not self._active_requests:
+                self._client_closed = True
+                close_client = True
+        if close_client:
+            self._close_client()
+
+    def _close_client(self) -> None:
+        try:
+            self.openai.close()
+        except Exception:
+            pass
 
     # ----------------------------------------
     # Один вызов модели со схемой ответа; ошибки валидации уходят модели (2 повтора)
@@ -64,9 +112,10 @@ class Model:
     def ask(self, messages: list[dict[str, str]], schema: type[T], context: dict[str, Any] | None = None,
             effort: str | None = None) -> T:
         effort = effort or self.config.reasoning_effort
-        return self.client.chat.completions.create(model=self.config.model, messages=messages,
-                                                   response_model=schema, max_retries=2, context=context or {},
-                                                   extra_body={"reasoning_effort": effort})
+        with self._request():
+            return self.client.chat.completions.create(model=self.config.model, messages=messages,
+                                                       response_model=schema, max_retries=2, context=context or {},
+                                                       extra_body={"reasoning_effort": effort})
 
     # ----------------------------------------
     # Тот же вызов, но текст идёт в on_piece по мере генерации; проверка и повторы — как обычно, в Instructor
@@ -74,8 +123,9 @@ class Model:
     def stream(self, messages: list[dict[str, str]], schema: type[T], context: dict[str, Any],
                on_piece: Callable[[str, str], None]) -> T:
         create = instructor.patch(create=lambda **kwargs: self._collect(on_piece, kwargs), mode=instructor.Mode.JSON)
-        return create(model=self.config.model, messages=messages, response_model=schema, max_retries=2,
-                      context=context, extra_body={"reasoning_effort": self.config.reasoning_effort})
+        with self._request():
+            return create(model=self.config.model, messages=messages, response_model=schema, max_retries=2,
+                          context=context, extra_body={"reasoning_effort": self.config.reasoning_effort})
 
     # ----------------------------------------
     # Одна попытка: читает поток Ollama и собирает обычный ChatCompletion для Instructor

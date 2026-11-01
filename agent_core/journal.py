@@ -26,29 +26,55 @@ class Journal:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.records: list[dict[str, Any]] = []
+        self._broken_tail = False
         if path.exists():
-            lines = path.read_text(encoding="utf-8").splitlines()
-            self.records = [json.loads(line) for line in lines if line.strip()]
+            lines = [(number, line) for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1) if line.strip()]
+            for index, (number, line) in enumerate(lines):
+                try:
+                    record = json.loads(line)
+                    if not isinstance(record, dict):
+                        raise ValueError("запись не является JSON-объектом")
+                except (json.JSONDecodeError, ValueError) as error:
+                    if index == len(lines) - 1:
+                        # После аварийного выхода последняя JSONL-строка может остаться недописанной.
+                        self._broken_tail = True
+                        break
+                    raise ValueError(f"Повреждён журнал {path}, строка {number}: {error}") from error
+                self.records.append(record)
 
     # ----------------------------------------
     # Новая сессия: logs/<дата>_<id>.jsonl (файл появится при первой записи)
     # ----------------------------------------
     @classmethod
     def new(cls) -> Journal:
-        return cls(LOGS_DIR / f"{datetime.now():%Y-%m-%d}_{datetime.now():%H%M%S}{secrets.token_hex(2)}.jsonl")
+        now = datetime.now()
+        return cls(LOGS_DIR / f"{now:%Y-%m-%d_%H%M%S}{secrets.token_hex(2)}.jsonl")
 
     # ----------------------------------------
     # Последний по времени журнал, кроме указанного
     # ----------------------------------------
     @classmethod
     def latest(cls, exclude: Path) -> Journal | None:
-        files = [p for p in LOGS_DIR.glob("*.jsonl") if p != exclude and p.stat().st_size > 0]
-        return cls(max(files, key=lambda p: p.stat().st_mtime)) if files else None
+        files: list[tuple[float, Path]] = []
+        for path in LOGS_DIR.glob("*.jsonl"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if path != exclude and stat.st_size > 0:
+                files.append((stat.st_mtime, path))
+        return cls(max(files, key=lambda item: item[0])[1]) if files else None
 
     # ----------------------------------------
     # Дописывает запись сразу на диск
     # ----------------------------------------
     def write(self, record: dict[str, Any]) -> None:
+        if self._broken_tail:
+            # Перед новой записью убираем лишь невалидный хвост, иначе он станет повреждением в середине.
+            self.path.write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in self.records),
+                                 encoding="utf-8")
+            self._broken_tail = False
         record = {"time": datetime.now().isoformat(timespec="seconds"), **record}
         self.records.append(record)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,7 +121,13 @@ def record_to_message(record: dict[str, Any], images: bool = False) -> dict[str,
         return {"role": "assistant", "content": json.dumps({"action": action}, ensure_ascii=False)}
     if kind == "result":
         body = f"ОШИБКА: {record['error']}" if record.get("error") else record["result"]
-        return {"role": "user", "content": f"[результат {record['name']}]\n{body}"}
+        text = f"[результат {record['name']}]\n{body}"
+        if not record.get("images"):
+            return {"role": "user", "content": text}
+        if not images:  # старый скриншот: модель помнит, что он был, но картинку уже не получает
+            return {"role": "user", "content": f"{text}\n[снимок уже не показывается]"}
+        return {"role": "user", "content": [{"type": "text", "text": text},
+                                            *(image_part(Path(path)) for path in record["images"])]}
     if kind == "answer":
         action = {"kind": "answer", "text": record["text"]}
         return {"role": "assistant", "content": json.dumps({"action": action}, ensure_ascii=False)}

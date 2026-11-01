@@ -1,6 +1,6 @@
 """Основа инструментов: описание Tool, декоратор @tool и реестр TOOLS, Workspace — всё, что нужно инструментам.
 
-Инструменты — по модулю на группу (files, search, shell, git, remember, browser); каждый регистрируется в TOOLS
+Инструменты — по модулю на группу (files, search, shell, git, remember, browser, skill_tools); каждый регистрируется в TOOLS
 декоратором @tool при импорте. Новый инструмент — функция с @tool в своём модуле и его импорт в agent.py
 (порядок импорта — порядок в промпте).
 """
@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import inspect
 import os
+import signal
+import subprocess
 import sys
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from ..config import Config
+from ..config import IS_WINDOWS, Config
 from ..memory import Memory
 
 if TYPE_CHECKING:
@@ -93,18 +97,22 @@ def trim(text: str, limit: int) -> str:
 
 
 # ----------------------------------------
-# Всё, что нужно инструментам: конфиг, браузер, память
+# Всё, что нужно инструментам: конфиг, браузер, память, «стоп» пользователя, картинки для модели
 # ----------------------------------------
 @dataclass
 class Workspace:
     config: Config
     browser: Browser
     memory: Memory
+    stop: threading.Event = field(default_factory=threading.Event)  # поднят — долгие инструменты прерываются
+    images: list[str] = field(default_factory=list)  # снимки шага (скриншот браузера): агент покажет их модели
 
     # ----------------------------------------
     # Путь внутри папки проекта; выход за её пределы — ошибка
     # ----------------------------------------
     def path(self, relative: str) -> Path:
+        if str(relative).strip().startswith("~"):  # иначе в проекте появится папка «~»
+            raise ValueError(f"путь {relative}: ~ нельзя, пути только от папки проекта (notes/a.md)")
         project = self.config.project_dir.resolve()
         full = (project / relative).resolve()
         if not full.is_relative_to(project):
@@ -131,3 +139,43 @@ def is_secret(path: Path) -> bool:
 def venv_env() -> dict[str, str]:
     bin_dir = str(Path(sys.executable).parent)
     return {**os.environ, "PATH": bin_dir + os.pathsep + os.environ.get("PATH", ""), "VIRTUAL_ENV": sys.prefix}
+
+
+# ----------------------------------------
+# Подпроцесс как subprocess.run (текст в UTF-8), но «стоп» пользователя убивает его сразу, вместе с дочерними
+# ----------------------------------------
+def run_process(args: list[str], *, cwd: Path, env: dict[str, str], timeout: float,
+                stop: threading.Event | None = None, input: str | None = None) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(args, cwd=cwd, env=env, text=True, encoding="utf-8", errors="replace",
+                               stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=not IS_WINDOWS)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            stdout, stderr = process.communicate(input, timeout=0.2)
+            return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            input = None  # вход уже отправлен; повторный communicate его не принимает
+            stopped = stop is not None and stop.is_set()
+            if stopped or time.monotonic() > deadline:
+                kill_tree(process)
+                if stopped:
+                    raise InterruptedError("остановлено пользователем") from None
+                raise subprocess.TimeoutExpired(args, timeout) from None
+
+
+# ----------------------------------------
+# Убивает процесс и его дочерние (bash -c "a | b" сам их не убьёт); вывод дочитывается не дольше 2 с
+# ----------------------------------------
+def kill_tree(process: subprocess.Popen[str]) -> None:
+    try:
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True)
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        process.kill()
+    try:
+        process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass

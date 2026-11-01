@@ -541,7 +541,7 @@ window.addEventListener("keydown", (e) => {
     e.stopPropagation();
     const filter = $("#wiki-filter");
     if (document.activeElement === filter && filter.value) { filter.value = ""; wiki.hits = []; renderWikiTree(); return; }
-    api().wiki_state().then((r) => { if (r.busy) api().stop(); else showWiki(false); });  // активная сессия — агент вики
+    api().wiki_state().then((r) => { if (r.busy) stopAgent(); else showWiki(false); });  // активная сессия — агент вики
     return;
   }
   if (e.ctrlKey && !e.altKey && e.code === "KeyS") { e.preventDefault(); e.stopPropagation(); saveWikiNote(); return; }

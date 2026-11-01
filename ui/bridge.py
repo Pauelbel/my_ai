@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import difflib
 import inspect
 import json
@@ -39,7 +40,8 @@ WIDGET_INTERVAL = 1 / 30  # состояние и громкость — в ви
 IS_WINDOWS = sys.platform == "win32"
 CONNECTION_KEYS = ("base_url", "model", "reasoning_effort", "skill_reasoning_effort")  # вкладка «Подключение»
 EFFORTS = ("none", "low", "medium", "high")
-HIDDEN_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache"}  # не в дереве
+HIDDEN_DIRS = {".git", ".trash", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache",
+               ".mypy_cache"}  # служебные и тяжёлые папки не показываем в дереве
 UI_KEYS = ("font_size", "theme", "sidebar", "settings_tab", "sidebar_width", "editor_width",  # настройки окна чата
            "wiki_open", "wiki_note", "wiki_tab", "wiki_closed",  # раздел «Вики»: открыт ли, заметка, вкладка,
            "wiki_side_width", "wiki_pane_width")  # свёрнутые разделы, ширина дерева и заметки
@@ -63,7 +65,8 @@ class UiState:
         self.path = path
         self._lock = threading.Lock()
         try:
-            self.data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            self.data: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
         except (OSError, ValueError):
             self.data = {}
 
@@ -71,7 +74,8 @@ class UiState:
     # Значение по ключу
     # ----------------------------------------
     def get(self, key: str, default: Any = None) -> Any:
-        return self.data.get(key, default)
+        with self._lock:
+            return self.data.get(key, default)
 
     # ----------------------------------------
     # Обновляет ключи и сразу пишет файл
@@ -79,8 +83,10 @@ class UiState:
     def update(self, **values: Any) -> None:
         with self._lock:
             self.data.update(values)
+            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
             try:
-                self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+                temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+                temporary.replace(self.path)
             except OSError as error:
                 log.warning("Не сохранил %s: %s", self.path.name, error)
 
@@ -175,7 +181,8 @@ class WidgetPort:
     # Текущее состояние — для первой загрузки страницы
     # ----------------------------------------
     def snapshot(self) -> dict[str, Any]:
-        return dict(self._state)
+        with self._lock:
+            return dict(self._state)
 
     # ----------------------------------------
     # Доставка с ограничением частоты
@@ -185,16 +192,19 @@ class WidgetPort:
             self._dirty.wait()
             self._dirty.clear()
             try:
-                self.window.run_js(f"window.onState && window.onState({json.dumps(self._state)})")
+                self.window.run_js(f"window.onState && window.onState({json.dumps(self.snapshot())})")
             except Exception as error:
                 log.debug("Состояние не доставлено в виджет: %s", error)
             time.sleep(WIDGET_INTERVAL)
 
 
 # ----------------------------------------
-# Дифф для подтверждения write_file / edit_file: что станет с файлом
+# Дифф для подтверждения write_file / edit_file / edit_skill: что станет с файлом
 # ----------------------------------------
 def make_diff(project: Path, name: str, args: dict[str, Any]) -> str:
+    if name == "edit_skill":  # скиллы лежат в папке агента, а не проекта
+        path = f"skills/{args.get('name')}/{args.get('file', 'run.py')}"
+        project, name, args = ROOT, "edit_file", {**args, "path": path}
     if name not in ("write_file", "edit_file") or not isinstance(args.get("path"), str):
         return ""
     path = args["path"]
@@ -205,7 +215,9 @@ def make_diff(project: Path, name: str, args: dict[str, Any]) -> str:
         before = full.read_text(encoding="utf-8") if full.is_file() else ""
     except (OSError, UnicodeDecodeError):
         return ""
-    if name == "write_file":
+    if name == "write_file" and args.get("append") and full.is_file():
+        after = before + ("" if before.endswith("\n") or not before else "\n") + str(args.get("content", ""))
+    elif name == "write_file":
         after = str(args.get("content", ""))
     else:
         old, new = str(args.get("old", "")), str(args.get("new", ""))
@@ -347,7 +359,8 @@ class ChatApi:
         self._dictate: Callable[[Callable[[str], None]], str | None] = lambda on_partial: None
         self._on_connection: Callable[[str, str], None] = lambda base_url, model: None
         self._window: Any = None
-        self._trash: list[str] = [str(path) for path in state.get("trash_spaces", [])]  # убранные пространства
+        saved_trash = state.get("trash_spaces", [])
+        self._trash: list[str] = [str(path) for path in saved_trash] if isinstance(saved_trash, list) else []
         for folder in folders:
             if str(folder) not in self._trash:
                 self._add_space(folder)
@@ -377,20 +390,21 @@ class ChatApi:
     # ----------------------------------------
     def send(self, text: str, session_id: str = "", images: list[str] | None = None) -> dict[str, Any]:
         text = str(text).strip()
-        session = self._session(session_id)
         if not text and not images:
             return {"ok": False}
-        if session.busy:
-            return {"ok": False, "error": "агент ещё работает — esc, чтобы остановить"}
-        try:
-            paths = [self._save_image(url, session.id) for url in images or []]
-        except ValueError as error:
-            return {"ok": False, "error": str(error)}
-        text = text or "Посмотри на картинку."
-        if session.title == "новая" and not text.startswith("/"):
-            session.title = text[:24] + ("…" if len(text) > 24 else "")
-        session.thread = threading.Thread(target=self._run, args=(session, text, paths), name="agent", daemon=True)
-        session.thread.start()
+        with self._lock:  # два быстрых Enter не должны запустить один Agent одновременно
+            session = self._session(session_id)
+            if session.busy:
+                return {"ok": False, "error": "агент ещё работает — esc, чтобы остановить"}
+            try:
+                paths = [self._save_image(url, session.id) for url in images or []]
+            except ValueError as error:
+                return {"ok": False, "error": str(error)}
+            text = text or "Посмотри на картинку."
+            if session.title == "новая" and not text.startswith("/"):
+                session.title = text[:24] + ("…" if len(text) > 24 else "")
+            session.thread = threading.Thread(target=self._run, args=(session, text, paths), name="agent", daemon=True)
+            session.thread.start()
         return {"ok": True, "session": session.id}
 
     # ----------------------------------------
@@ -488,16 +502,16 @@ class ChatApi:
             root, _ = self._space_path("")
         except (KeyError, ValueError):
             return {"repo": False, "items": []}
-        return changes(root)
+        return {**changes(root), "root": str(root)}
 
     # ----------------------------------------
     # Строки сравнения «HEAD | сейчас» для вкладки редактора; orig — старый путь у переименования
     # ----------------------------------------
-    def git_diff(self, path: str, orig: str = "") -> dict[str, Any]:
+    def git_diff(self, path: str, orig: str = "", root: str = "") -> dict[str, Any]:
         try:
-            root, _ = self._space_path(path)
+            root, _ = self._space_path(path, root)
             if orig:
-                self._space_path(orig)
+                self._space_path(orig, str(root))
         except ValueError as error:
             return {"ok": False, "error": str(error)}
         return {**diff_rows(root, path, orig), "root": str(root)}
@@ -560,7 +574,7 @@ class ChatApi:
                 raise FileNotFoundError(f"{path} не существует")
             trash = root / ".trash"
             trash.mkdir(exist_ok=True)
-            target = trash / f"{datetime.now():%Y%m%d_%H%M%S}_{full.name}"
+            target = trash / f"{datetime.now():%Y%m%d_%H%M%S_%f}_{full.name}"
             shutil.move(full, target)
         except (OSError, ValueError) as error:
             return {"ok": False, "error": str(error)}
@@ -591,12 +605,16 @@ class ChatApi:
     # Картинка сообщения для ленты: data URL (страница открыта по http — file:// ей недоступен); только из logs/images/
     # ----------------------------------------
     def image(self, path: str) -> str:
-        full = Path(str(path)).resolve()
-        mime = {ext: mime for mime, ext in IMAGE_TYPES.items()}.get(full.suffix.lstrip("."))
-        folders = (IMAGES_DIR.resolve(), (self._wiki.root / WIKI_IMAGES).resolve())
-        if not mime or not any(full.is_relative_to(folder) for folder in folders) or not full.is_file():
+        try:
+            full = Path(str(path)).resolve()
+            mime = {ext: mime for mime, ext in IMAGE_TYPES.items()}.get(full.suffix.lstrip("."))
+            folders = (IMAGES_DIR.resolve(), (self._wiki.root / WIKI_IMAGES).resolve())
+            if not mime or not any(full.is_relative_to(folder) for folder in folders) or not full.is_file():
+                return ""
+            data = full.read_bytes()
+        except OSError:
             return ""
-        return f"data:{mime};base64,{base64.b64encode(full.read_bytes()).decode('ascii')}"
+        return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
     # ----------------------------------------
     # Картинка из чата (data URL) → файл в logs/images/; путь уходит ядру
@@ -606,7 +624,12 @@ class ChatApi:
         mime = head.removeprefix("data:").removesuffix(";base64")
         if mime not in IMAGE_TYPES or not head.endswith(";base64"):
             raise ValueError(f"картинка {mime or '?'} не поддерживается: только png, jpeg, webp, gif")
-        raw = base64.b64decode(data)
+        if len(data) > ((MAX_IMAGE_BYTES + 2) // 3) * 4:
+            raise ValueError(f"картинка больше {MAX_IMAGE_BYTES // 1_000_000} МБ")
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise ValueError("картинка повреждена") from error
         if len(raw) > MAX_IMAGE_BYTES:
             raise ValueError(f"картинка больше {MAX_IMAGE_BYTES // 1_000_000} МБ")
         IMAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -762,18 +785,21 @@ class ChatApi:
     # Закрывает вкладку (последнюю — заменяет новой)
     # ----------------------------------------
     def close_session(self, session_id: str) -> dict[str, Any]:
-        space = self._spaces[self._active]
-        session = next((s for s in space.sessions if s.id == session_id), None)
-        if session is None:
-            return self.state()
-        session.agent.stop()
-        session.agent.close()
-        space.sessions.remove(session)
-        if not space.sessions:
-            space.sessions.append(Session(space.config, space.path))
-        if space.active == session_id:
-            space.active = space.sessions[-1].id
-        return self.state()
+        with self._lock:
+            space = self._spaces[self._active]
+            session = next((s for s in space.sessions if s.id == session_id), None)
+            if session is None:
+                return self.state()
+            if session.busy:
+                return {"ok": False, "error": "агент работает — сначала остановите его и дождитесь завершения",
+                        **self.state()}
+            session.agent.close()
+            space.sessions.remove(session)
+            if not space.sessions:
+                space.sessions.append(Session(space.config, space.path))
+            if space.active == session_id:
+                space.active = space.sessions[-1].id
+        return {"ok": True, **self.state()}
 
     # ----------------------------------------
     # Быстрые команды для автодополнения по «/» — из /помощь ядра
@@ -781,8 +807,10 @@ class ChatApi:
     def commands(self) -> list[dict[str, str]]:
         if self._commands is None:
             agent = Agent(self._config)
-            text = "\n".join(e.text for e in agent.send("/помощь") if e.type == "info")
-            agent.close()
+            try:
+                text = "\n".join(e.text for e in agent.send("/помощь") if e.type == "info")
+            finally:
+                agent.close()
             self._commands = []
             for line in text.splitlines():
                 head, _, desc = line.partition(" — ") if " — " in line else line.partition(" → ")
@@ -808,11 +836,11 @@ class ChatApi:
     # Проверка адреса Ollama: отвечает ли и какие модели есть (`ollama list`)
     # ----------------------------------------
     def check_connection(self, base_url: str) -> dict[str, Any]:
-        url = base_url.strip().rstrip("/").removesuffix("/v1") + "/api/tags"
+        url = str(base_url).strip().rstrip("/").removesuffix("/v1") + "/api/tags"
         try:
             with urllib.request.urlopen(url, timeout=3) as response:
                 models = sorted(item["name"] for item in json.load(response).get("models", []))
-        except (OSError, ValueError, KeyError) as error:
+        except (OSError, TypeError, ValueError, KeyError) as error:
             return {"ok": False, "error": f"Ollama не отвечает: {error}"}
         return {"ok": True, "models": models}
 

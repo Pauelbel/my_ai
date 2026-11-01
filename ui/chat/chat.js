@@ -81,7 +81,8 @@ function toolTitle(name) {
 // ----------------------------------------
 function toolIcon(name) {
   const icons = { read_file: "▤", write_file: "✎", edit_file: "✎", list_dir: "▦", search: "⌕",
-                  delete: "✕", run: "❯", browser: "◍", remember: "✦", new_skill: "✚" };
+                  delete: "✕", run: "❯", browser: "◍", remember: "✦", new_skill: "✚",
+                  read_skill: "▤", edit_skill: "✎" };
   return icons[name] || "⚙";
 }
 
@@ -675,6 +676,7 @@ function render(state) {
   feeds.forEach((feed, id) => { if (feed.el.parentElement === $("#feeds")) feed.el.hidden = id !== app.session; });  // лента вики — в своей колонке
   const feed = feeds.get(app.session);
   if (feed) feed.scroll();
+  setBusy(app.sessions.some((s) => s.id === app.session && s.busy));  // вкладку сменили — кнопка по её агенту
 }
 
 // ----------------------------------------
@@ -1789,12 +1791,32 @@ function submit() {
   const text = input.value.trim();
   if (!text && !attached.length) return;
   const feed = feeds.get(app.session);
-  if (text === "/стоп") { api().stop(); input.value = ""; autosize(); return; }
+  if (text === "/стоп") { stopAgent(); input.value = ""; autosize(); return; }
   api().send(text, "", attached.map((a) => a.url)).then((r) => {
-    if (r && r.ok) { input.value = ""; autosize(); historyIndex = -1; feed.stick = true; clearAttachments(); refreshState(); }
+    if (r && r.ok) { input.value = ""; autosize(); historyIndex = -1; feed.stick = true; clearAttachments(); setBusy(true); refreshState(); }
     else if (r && r.error) feed.append(el("div", "warning-line", r.error));
   });
 }
+
+// ----------------------------------------
+// Кнопка «стоп» видна, пока агент активной вкладки работает
+// ----------------------------------------
+function setBusy(busy) {
+  const button = $("#stop");
+  if (button.hidden === !busy) return;
+  button.hidden = !busy;
+  button.classList.remove("stopping");
+}
+
+// ----------------------------------------
+// Стоп агента активной вкладки (кнопка, Esc, /стоп): кнопка бледнеет, пока луп не закончится
+// ----------------------------------------
+function stopAgent() {
+  if (!$("#stop").hidden) $("#stop").classList.add("stopping");
+  api().stop();
+}
+
+$("#stop").onclick = stopAgent;
 
 // ----------------------------------------
 // Быстрые команды, подходящие к набранному «/…»
@@ -1920,6 +1942,7 @@ function pollStatus() {
     if (!data) return;
     app.status = data;
     renderStatus(data);
+    setBusy(data.busy);
     const changed = JSON.stringify(data.spaces) !== JSON.stringify(app.spaces) ||
                     JSON.stringify(data.sessions) !== JSON.stringify(app.sessions);
     if (changed) {
@@ -2214,7 +2237,7 @@ document.addEventListener("keydown", (e) => {
     if ($("#editor").contains(document.activeElement)) return;  // Esc в редакторе не останавливает агента
     if (!$("#settings").hidden) closeSettings();
     else if (!$("#popup").hidden) $("#popup").hidden = true;
-    else api().stop();
+    else stopAgent();
     e.preventDefault();
   }
 });
@@ -2238,6 +2261,7 @@ window.onEvent = function (ev) {
   if (ev.type === "dictation") { showDictation(ev.text); return; }  // черновик диктовки — не событие сессии
   const feed = ensureFeed(ev.session);
   feed.onEvent(ev);
+  if (ev.type === "done" && ev.session === app.session) setBusy(false);
   if (ev.type === "status" && ev.session === app.session && app.status) {
     app.status.status = ev.data;
     renderStatus(app.status);

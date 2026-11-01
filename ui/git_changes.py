@@ -32,6 +32,17 @@ def repo_top(root: Path) -> Path | None:
 
 
 # ----------------------------------------
+# Путь из ответа UI внутри пространства; resolve также не даёт уйти наружу через симлинк
+# ----------------------------------------
+def workspace_path(root: Path, path: str) -> Path:
+    root = root.resolve()
+    full = (root / path).resolve()
+    if not full.is_relative_to(root):
+        raise ValueError(f"{path} вне папки пространства")
+    return full
+
+
+# ----------------------------------------
 # Буква статуса из пары XY porcelain: U — новый, M/A/D/R
 # ----------------------------------------
 def status_letter(xy: str) -> str:
@@ -82,9 +93,12 @@ def diff_rows(root: Path, path: str, orig: str = "") -> dict[str, Any]:
     top = repo_top(root)
     if top is None:
         return {"ok": False, "error": "не git-репозиторий"}
-    head_path = (root / (orig or path)).resolve().relative_to(top).as_posix()
+    try:
+        full = workspace_path(root, path)
+        head_path = workspace_path(root, orig or path).relative_to(top).as_posix()
+    except ValueError as error:
+        return {"ok": False, "error": str(error)}
     before = git(top, "show", f"HEAD:{head_path}") or ""
-    full = root / path
     try:
         after = full.read_text(encoding="utf-8", errors="replace") if full.is_file() else ""
     except OSError as error:

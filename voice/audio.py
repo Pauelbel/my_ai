@@ -29,6 +29,7 @@ class Recorder:
         self._rate = SAMPLE_RATE
         self._on_level: Callable[[float], None] | None = None
         self._on_block: Callable[[np.ndarray, int], None] | None = None
+        self._stopping = False
         self._lock = threading.Lock()
 
     # ----------------------------------------
@@ -36,7 +37,8 @@ class Recorder:
     # ----------------------------------------
     @property
     def is_recording(self) -> bool:
-        return self._stream is not None
+        with self._lock:
+            return self._stream is not None and not self._stopping
 
     # ----------------------------------------
     # Открывает микрофон; если он не умеет 16 кГц — пишет в родной частоте
@@ -51,26 +53,52 @@ class Recorder:
             self._chunks = []
             self._on_level = on_level
             self._on_block = on_block  # сырые куски звука и их частота — для живого распознавания
+            stream = None
             try:
-                stream = self._open(sd, SAMPLE_RATE)
-            except sd.PortAudioError:
-                rate = int(sd.query_devices(self.device, "input")["default_samplerate"])
-                log.info("Микрофон не поддерживает %d Гц, пишу в %d Гц", SAMPLE_RATE, rate)
-                stream = self._open(sd, rate)
-            stream.start()
-            self._stream = stream
+                try:
+                    stream = self._open(sd, SAMPLE_RATE)
+                except sd.PortAudioError:
+                    rate = int(sd.query_devices(self.device, "input")["default_samplerate"])
+                    log.info("Микрофон не поддерживает %d Гц, пишу в %d Гц", SAMPLE_RATE, rate)
+                    stream = self._open(sd, rate)
+                stream.start()
+                self._stream = stream
+            except Exception:
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        log.debug("Не удалось закрыть микрофон после ошибки старта", exc_info=True)
+                self._chunks = []
+                self._on_level = self._on_block = None
+                raise
 
     # ----------------------------------------
     # Останавливает запись и возвращает звук 16 кГц моно float32
     # ----------------------------------------
     def stop(self) -> np.ndarray:
         with self._lock:
-            stream, self._stream = self._stream, None
-        if stream is None:
-            return np.zeros(0, dtype=np.float32)
-        stream.stop()
-        stream.close()
-        chunks, self._chunks = self._chunks, []
+            stream = self._stream
+            if stream is None or self._stopping:
+                return np.zeros(0, dtype=np.float32)
+            self._stopping = True
+        error: Exception | None = None
+        try:
+            stream.stop()
+        except Exception as caught:
+            error = caught
+        try:
+            stream.close()
+        except Exception as caught:
+            if error is None:
+                error = caught
+        with self._lock:
+            self._stream = None
+            self._stopping = False
+            chunks, self._chunks = self._chunks, []
+            self._on_level = self._on_block = None
+        if error is not None:
+            raise error
         if not chunks:
             return np.zeros(0, dtype=np.float32)
         return resample(np.concatenate(chunks), self._rate, SAMPLE_RATE)

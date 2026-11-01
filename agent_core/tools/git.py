@@ -33,8 +33,12 @@ def git_commit(ws: Workspace, message: str, files: str = "") -> str:
         raise ValueError("пустое сообщение коммита")
     paths = [ws.rel(ws.path(item)) for item in shlex.split(files)]
     git(ws, "add", "-A", "--", *(paths or ["."]))
-    staged = git(ws, "diff", "--cached", "--stat")
+    staged = git(ws, "diff", "--cached", "--stat", *( ["--", *paths] if paths else []))
     if not staged:
         raise RuntimeError("нечего коммитить: изменений нет")
-    git(ws, "commit", "-m", message.strip())
+    commit_args = ["commit", "-m", message.strip()]
+    if paths:
+        # Обычный commit захватил бы и чужие, уже staged-файлы; --only оставляет их в индексе.
+        commit_args.extend(["--only", "--", *paths])
+    git(ws, *commit_args)
     return f"{git(ws, 'log', '-1', '--pretty=format:%h %s')}\n\n{staged}"

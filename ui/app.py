@@ -80,7 +80,10 @@ class App:
     # ----------------------------------------
     def _folders(self) -> list[Path]:
         folders = [self.core.project_dir]
-        for item in [*self.ui.get("spaces", []), *self.state.get("spaces", [])]:
+        configured = self.ui.get("spaces", [])
+        saved = self.state.get("spaces", [])
+        items = [*(configured if isinstance(configured, list) else []), *(saved if isinstance(saved, list) else [])]
+        for item in items:
             folder = (ROOT / Path(item).expanduser()).resolve()
             if folder.is_dir() and folder not in folders:
                 folders.append(folder)
@@ -91,6 +94,8 @@ class App:
     # ----------------------------------------
     def run(self, debug: bool = False) -> None:
         gui = pick_gui()
+        if gui == "qt":
+            allow_page_features()
         import webview
 
         size = int(self.ui.get("widget_size", WIDGET_SIZE))
@@ -325,7 +330,7 @@ class App:
     # ----------------------------------------
     def _on_connection(self, base_url: str, model: str) -> None:
         if self.voice:
-            self.voice.base_url, self.voice.model = base_url, model
+            self.voice.configure(base_url, model)
 
     # ----------------------------------------
     # Qt, до первого показа: окно виджета — неуправляемым, иначе KWin прижимает большое окно к краю экрана
@@ -350,7 +355,25 @@ class App:
             except Exception:
                 log.warning("Маска окна недоступна — меню будет открываться изменением окна", exc_info=True)
                 self.mask = False
+                self._disable_mask()
         return bool(self.mask)
+
+    # ----------------------------------------
+    # Qt-маска не создалась: превращает заранее увеличенное окно обратно в обычное 140×140 без скачка головы
+    # ----------------------------------------
+    def _disable_mask(self) -> None:
+        if not self.masked:
+            return
+        ox, oy = self._ring_offset
+        x, y = self.widget.x, self.widget.y
+        self.masked = False
+        self._ring_offset = (0, 0)
+        if x is None or y is None:
+            return
+        self._head_pos = (x + ox, y + oy)
+        size = int(self.ui.get("widget_size", WIDGET_SIZE))
+        self.widget.resize(size, size)
+        self.widget.move(*self._head_pos)
 
     # ----------------------------------------
     # Перетаскивание виджета мышью
@@ -442,6 +465,32 @@ def default_position(webview: Any, size: int) -> list[int | None]:
 
 
 # ----------------------------------------
+# Разрешения страниц на Qt. Обработчик pywebview передаёт в setFeaturePermission число вместо enum — PyQt6 на этом
+# падает (abort), как только страница просит буфер обмена («копировать» в чате). Свой: буфер и микрофон — да, прочее — нет
+# ----------------------------------------
+def allow_page_features() -> None:
+    from qtpy.QtWebEngineCore import QWebEnginePage
+    from webview.platforms.qt import BrowserView
+
+    feature, policy = QWebEnginePage.Feature, QWebEnginePage.PermissionPolicy
+    allowed = {feature.ClipboardReadWrite, feature.MediaAudioCapture, feature.MediaVideoCapture,
+               feature.MediaAudioVideoCapture}
+
+    # ----------------------------------------
+    # Ответ на запрос страницы; исключение здесь уронило бы весь процесс — только в лог
+    # ----------------------------------------
+    def on_request(page: Any, url: Any, asked: Any) -> None:
+        try:
+            granted = asked in allowed
+            page.setFeaturePermission(url, asked, policy.PermissionGrantedByUser if granted
+                                      else policy.PermissionDeniedByUser)
+        except Exception:
+            log.exception("Разрешение страницы не обработано")
+
+    BrowserView.WebPage.onFeaturePermissionRequested = on_request
+
+
+# ----------------------------------------
 # Бэкенд окон: Windows — WebView2 (по умолчанию), Linux — Qt из pip, иначе системный GTK
 # ----------------------------------------
 def pick_gui() -> str | None:
@@ -451,6 +500,11 @@ def pick_gui() -> str | None:
         # Под Wayland окно нельзя двигать и держать поверх всех — Qt идёт через XWayland
         if os.environ.get("WAYLAND_DISPLAY"):
             os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+        # Видеопамять почти целиком занимает модель Ollama: при растягивании окна Chromium не смог выделить
+        # буфер («Skia OOM»), потерял GPU-контекст, и окно чата почернело насовсем. Окнам GPU не нужен
+        flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        if "--disable-gpu" not in flags.split():
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{flags} --disable-gpu".strip()
         return "qt"
     # WebKitGTK под Wayland (особенно с NVIDIA) падает на DMABUF-рендерере
     os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
@@ -479,12 +533,21 @@ def main() -> None:
         handlers.append(logging.StreamHandler())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", handlers=handlers)
     holder: list[App] = []
+    pending_show = threading.Event()
+
+    def request_show() -> None:
+        pending_show.set()
+        if holder:
+            holder[0].activate()
+
     try:
-        serve(lambda: holder and holder[0].activate())  # раньше App(): пока грузятся голос и агенты, второй запуск не стартует
+        serve(request_show)  # раньше App(): пока грузятся голос и агенты, второй запуск не стартует
     except OSError:
         logging.getLogger("ui").exception("Один экземпляр: порт не открылся")
-    app = App(args.chat)
+    app = App(args.chat or pending_show.is_set())
     holder.append(app)
+    if pending_show.is_set():  # запрос мог прийти между App() и добавлением в holder
+        app.show_chat = app.chat_visible = True
     # Ctrl+C или kill — тоже штатный выход: иначе скрипт KWin и микрофон остаются занятыми
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: threading.Thread(target=app.quit, daemon=True).start())

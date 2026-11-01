@@ -43,8 +43,7 @@ class ServiceCommands:
         if last.get("type") == "call":
             yield Event("info", f"Повторяю незавершённый шаг: {last['name']} {show_args(last['args'])}")
             result, error = yield from self._execute(last["name"], last["args"])
-            self.journal.write({"type": "result", "step": last.get("step", steps), "name": last["name"],
-                                "result": result, "error": error})
+            self._write_result(last.get("step", steps), last["name"], result, error)
             yield Event("tool_result", f"ОШИБКА: {error}" if error else result, {"name": last["name"], "error": error})
         yield from self._loop(task, step=steps)
 
@@ -107,5 +106,8 @@ class ServiceCommands:
         folder = Path(path).expanduser().resolve()
         if not folder.is_dir():
             return f"Папки {folder} нет."
+        if folder != self.config.project_dir.resolve():
+            # Разрешения на изменяющие инструменты не должны переноситься в другой проект.
+            self.approved.clear()
         self.config.project_dir = folder
         return f"Папка проекта: {folder}"

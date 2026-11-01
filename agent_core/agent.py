@@ -8,7 +8,7 @@ import queue
 import secrets
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Generator
@@ -24,7 +24,7 @@ from .schemas import Action, Answer, Facts, NeedSkill, Reply
 from .service import ServiceCommands
 from .skill_flow import SkillFlow
 from .skills import SkillInfo, load_skills, run_skill
-from .tools import files, search, shell, git, remember, browser  # noqa: F401 — импорт регистрирует инструменты в TOOLS
+from .tools import files, search, shell, git, remember, browser, skill_tools  # noqa: F401 — импорт регистрирует инструменты в TOOLS
 from .tools.base import TOOLS, Tool, Workspace, trim
 from .tools.browser import Browser
 
@@ -60,7 +60,8 @@ class Agent(ServiceCommands, SkillFlow):
         self.config = config or Config.load()
         self.model = Model(self.config)
         self.memory = Memory()
-        self.ws = Workspace(self.config, Browser.shared(self.config.headless), self.memory)
+        self._stop = threading.Event()
+        self.ws = Workspace(self.config, Browser.shared(self.config.headless), self.memory, self._stop)
         self._skills = load_skills()
         self.toolset: dict[str, Tool] = TOOLS  # инструменты, которые видит модель (у агента вики — свои)
         self.commands = load_commands()
@@ -70,7 +71,6 @@ class Agent(ServiceCommands, SkillFlow):
         self.step = 0
         self.step_limit = self.config.max_steps  # растёт, когда пользователь просит продолжить
         self.started = time.monotonic()
-        self._stop = threading.Event()
         self._closed = False
         self._answers: dict[str, str] = {}
         self._answered = threading.Condition()
@@ -171,10 +171,18 @@ class Agent(ServiceCommands, SkillFlow):
     # ----------------------------------------
     def configure(self, **changes: Any) -> None:
         base_url = self.config.base_url
+        previous = {key: getattr(self.config, key) for key in changes}
         for key, value in changes.items():
             setattr(self.config, key, value)
         if self.config.base_url != base_url:
-            self.model = Model(self.config)
+            try:
+                model = Model(self.config)
+            except Exception:
+                for key, value in previous.items():
+                    setattr(self.config, key, value)
+                raise
+            old_model, self.model = self.model, model
+            old_model.close()
 
     # ----------------------------------------
     # Записи журнала текущей сессии — по ним UI восстанавливает ленту
@@ -188,7 +196,11 @@ class Agent(ServiceCommands, SkillFlow):
     def close(self) -> None:
         if not self._closed:
             self._closed = True
-            self.ws.browser.release()
+            self.stop()
+            try:
+                self.ws.browser.release()
+            finally:
+                self.model.close()
 
     # ----------------------------------------
     # Быстрая команда: сразу запускает скилл, модель не вызывается
@@ -202,7 +214,7 @@ class Agent(ServiceCommands, SkillFlow):
         self.journal.write({"type": "call", "step": 0, "name": name, "args": args})
         yield Event("step", f"{name} {show_args(args)}", {"step": 0, "name": name, "args": args})
         result, error = yield from self._execute(name, args)
-        self.journal.write({"type": "result", "step": 0, "name": name, "result": result, "error": error})
+        self._write_result(0, name, result, error)
         self.journal.write({"type": "end"})
         yield Event("answer", f"ОШИБКА: {error}" if error else result)
 
@@ -355,9 +367,18 @@ class Agent(ServiceCommands, SkillFlow):
         self.journal.write({"type": "call", "step": step, "name": name, "args": args})
         yield Event("step", f"{name} {show_args(args)}", {"step": step, "name": name, "args": args})
         result, error = yield from self._execute(name, args)
-        self.journal.write({"type": "result", "step": step, "name": name, "result": result, "error": error})
+        self._write_result(step, name, result, error)
         yield Event("tool_result", f"ОШИБКА: {error}" if error else result, {"name": name, "error": error})
         return result, error
+
+    # ----------------------------------------
+    # Результат шага в журнал; снимки инструмента (скриншот) — туда же: модель увидит их следующим шагом
+    # ----------------------------------------
+    def _write_result(self, step: int, name: str, result: str, error: str | None) -> None:
+        record: dict[str, Any] = {"type": "result", "step": step, "name": name, "result": result, "error": error}
+        if self.ws.images:
+            record["images"], self.ws.images = self.ws.images, []
+        self.journal.write(record)
 
     # ----------------------------------------
     # Выполняет инструмент или скилл; любая ошибка становится текстом для модели
@@ -371,9 +392,12 @@ class Agent(ServiceCommands, SkillFlow):
                     allowed = yield from self._confirm(name, args)
                     if not allowed:
                         return "пользователь отклонил это действие", None
-                return trim(str(item.func(self.ws, **args)), limit), None
+                result = trim(str(item.func(self.ws, **args)), limit)
+                if name == "edit_skill":  # могли поменяться args и description в SKILL.md
+                    self._skills = load_skills()
+                return result, None
             if name in self._skills:
-                return trim(run_skill(self._skills[name], args, self.config), limit), None
+                return trim(run_skill(self._skills[name], args, self.config, self._stop), limit), None
             return "", f"нет инструмента или скилла {name}"
         except Exception as error:
             return "", trim(f"{type(error).__name__}: {error}", limit)
@@ -433,12 +457,17 @@ class Agent(ServiceCommands, SkillFlow):
     # Отдельный вызов модели: только собственные слова пользователя, без выводов
     # ----------------------------------------
     def _auto_memory(self, task: str) -> None:
-        messages = [{"role": "system", "content": MEMORY_FILTER_PROMPT},
-                    {"role": "user", "content": f"Уже в памяти:\n{self.memory.read() or '(пусто)'}\n\n"
-                                                f"Сообщение пользователя:\n{task}"}]
+        model: Model | None = None
         try:
-            facts = self.model.ask(messages, Facts).facts
+            messages = [{"role": "system", "content": MEMORY_FILTER_PROMPT},
+                        {"role": "user", "content": f"Уже в памяти:\n{self.memory.read() or '(пусто)'}\n\n"
+                                                    f"Сообщение пользователя:\n{task}"}]
+            model = Model(replace(self.config))
+            facts = model.ask(messages, Facts).facts
         except Exception:
             return
+        finally:
+            if model is not None:
+                model.close()
         for fact in facts[:3]:
             self.memory.add(fact)
